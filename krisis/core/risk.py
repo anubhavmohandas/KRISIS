@@ -66,6 +66,18 @@ OUTCOME_TRUST: dict[str, float] = {
 
 MIN_SIMILARITY_FOR_SCORING = 0.6
 
+# Combined brand-impersonation + credential-collection evidence is materially
+# stronger than either alone: a domain that merely doesn't match its page's
+# claimed name, or a form that merely asks for a password, is each
+# individually common and often benign; both together in the same
+# investigation is the actual credential-phishing pattern. Keyed on signal
+# names, same shape as NARROW_CONTRADICTIONS below, so it survives
+# independently of which collector produced which signal. Kept as one small,
+# capped, documented rule rather than a general interaction-rule engine.
+INTERACTION_IMPERSONATION_SIGNALS = frozenset({"lookalike_domain", "brand_domain_mismatch"})
+INTERACTION_CREDENTIAL_SIGNALS = frozenset({"credential_form"})
+INTERACTION_BONUS_POINTS = 14.0
+
 
 def outcome_trust(prior_outcome: Optional[str]) -> float:
     return OUTCOME_TRUST.get(
@@ -164,7 +176,23 @@ class RiskEngine:
                     )
                 )
 
-        raw_score = support_points + historical_points - (0.5 * contra_points)
+        # See INTERACTION_* above: applied before diversity_factor, exactly like
+        # historical_points — and since every one of the new page signals shares
+        # source="page", this bonus can never let the page collector alone buy
+        # its own diversity boost.
+        interaction_points = 0.0
+        supporting_signals = {ev.signal for ev in correlation.supporting}
+        if (supporting_signals & INTERACTION_IMPERSONATION_SIGNALS) and (
+            supporting_signals & INTERACTION_CREDENTIAL_SIGNALS
+        ):
+            interaction_points = INTERACTION_BONUS_POINTS
+            support_contributors.append((
+                interaction_points,
+                "combined brand-impersonation + credential-collection evidence "
+                "(stronger together than either alone)",
+            ))
+
+        raw_score = support_points + historical_points + interaction_points - (0.5 * contra_points)
         # Evidence diversity acts as a confidence multiplier on the raw score rather
         # than an additive bonus — a single-source finding should not reach HIGH.
         diversity_factor = 0.6 + 0.4 * correlation.evidence_diversity

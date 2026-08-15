@@ -14,9 +14,11 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from krisis.ai.explain import Explainer
 from krisis.collectors.base import CollectorResult, EvidenceCollector
+from krisis.collectors.page_collector import PageCollector
 from krisis.core.investigator import Investigator
 from krisis.core.models import Entity, Evidence, Independence, Polarity
 from krisis.core.pivot_engine import InvestigationBudget
@@ -153,6 +155,107 @@ class TestInvestigatorIntegration(unittest.TestCase):
         investigator.pivot_engine.budget = investigator.budget
         case, _ = investigator.investigate("suspicious-login.com")
         self.assertLessEqual(investigator.budget.entities_investigated, 2)
+
+
+class FakeURLReputationCollector(EvidenceCollector):
+    """Stands in for VirusTotal: clean/neutral, present only so coverage has an
+    actual reputation source and the page-collector's independent evidence
+    isn't the only source diversity has to work with."""
+
+    name = "virustotal"
+    supports = ("url", "domain")
+
+    def collect(self, entity: Entity) -> CollectorResult:
+        ev = Evidence(
+            source=self.name, entity_id=entity.id, signal="no_detections",
+            value=0, evidence_type="reputation",
+            polarity=Polarity.NEUTRAL, confidence=0.3, independence=Independence.INDEPENDENT,
+        )
+        return CollectorResult(evidence=[ev], available=True)
+
+
+class _FakeHTTPResponse:
+    def __init__(self, status_code=200, headers=None, body=b""):
+        self.status_code = status_code
+        self.headers = headers or {}
+        self._body = body
+        self.encoding = "utf-8"
+
+    def iter_content(self, chunk_size=8192):
+        for i in range(0, len(self._body), chunk_size):
+            yield self._body[i : i + chunk_size]
+
+    def close(self):
+        pass
+
+
+def _public_addrinfo(*_a, **_kw):
+    return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+
+class TestSecuritySignalScenario(unittest.TestCase):
+    """End-to-end synthetic phishing scenario, run through the real
+    Investigator + real PageCollector (network mocked, nothing else faked
+    about the pipeline): a decorated domain redirects cross-domain to a page
+    claiming an invented identity ("GlorpTech" — not a real brand), with a
+    password field whose form posts to a third, unrelated domain. Exercises
+    the full redirect/URL-intent/brand-mismatch/credential-harvesting signal
+    chain (krisis/collectors/page_collector.py) plus the risk engine's
+    interaction bonus (krisis/core/risk.py::INTERACTION_BONUS_POINTS), and
+    proves the combined verdict is *earned* from these evidence items, not
+    hardcoded for this or any domain.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.storage = Storage(os.path.join(self.tmpdir, "test.db"))
+        self.pattern_memory = PatternMemory(self.storage)
+        self.case_memory = CaseMemory(self.storage, self.pattern_memory)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_combined_signals_produce_a_credential_phishing_hypothesis(self):
+        redirect = _FakeHTTPResponse(
+            status_code=302, headers={"Location": "https://secure-verify-portal.test/login"}
+        )
+        page = _FakeHTTPResponse(status_code=200, body=(
+            '<html><head><meta property="og:site_name" content="GlorpTech">'
+            "<title>Sign in - GlorpTech</title></head><body>"
+            '<form action="https://collect-data.test/submit" method="post">'
+            '<input type="text" name="username">'
+            '<input type="password" name="password">'
+            "</form></body></html>"
+        ).encode("utf-8"))
+
+        investigator = Investigator(
+            collectors=[PageCollector(), FakeDNSCollector(), FakeURLReputationCollector()],
+            case_memory=self.case_memory,
+            pattern_memory=self.pattern_memory,
+            # depth 0: only the seed URL/domain are fetched — keeps this test
+            # about the seed's own evidence, not the discovered redirect
+            # target's follow-on investigation (covered separately).
+            budget=InvestigationBudget(max_depth=0, max_entities=20, max_external_calls=50),
+            explainer=Explainer(use_llm=False),
+        )
+
+        with mock.patch(
+            "krisis.collectors.page_collector.socket.getaddrinfo", side_effect=_public_addrinfo
+        ), mock.patch("requests.get", side_effect=[redirect, page]):
+            case, _trace = investigator.investigate("https://glorptech-login.example/login")
+
+        signals = {e.signal for e in case.evidence.values()}
+        for expected in (
+            "authentication_intent", "brand_domain_mismatch", "credential_form",
+            "external_form_action", "cross_domain_redirect",
+        ):
+            self.assertIn(expected, signals, f"expected {expected!r} in {sorted(signals)}")
+
+        self.assertIn(case.risk.category.value, ("MEDIUM", "HIGH", "CRITICAL"))
+        self.assertTrue(
+            any("combined" in c for c in case.risk.top_contributors),
+            case.risk.top_contributors,
+        )
 
 
 if __name__ == "__main__":

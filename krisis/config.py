@@ -21,6 +21,8 @@ from .collectors.base import EvidenceCollector
 from .collectors.dns_collector import DNSCollector
 from .collectors.identity_collector import IdentityCollector
 from .collectors.ip_collector import IPCollector
+from .collectors.message_collector import MessageCollector
+from .collectors.page_collector import PageCollector
 from .collectors.tls_collector import TLSCollector
 from .collectors.virustotal_collector import VirusTotalCollector
 from .collectors.whois_collector import WHOISCollector
@@ -91,6 +93,23 @@ def provider_policies() -> dict[str, ProviderPolicy]:
         "tls": ProviderPolicy(name="tls", **cheap),
         "ip_whois": ProviderPolicy(name="ip_whois", **cheap),
         "identity": ProviderPolicy(name="identity", broad_enrichment=True, cache_ttl_seconds=0.0),
+        # Page fetches are gated like VirusTotal (broad_enrichment=False, so only
+        # the seed and load-bearing pivots earn one) — but the reason is abuse/
+        # latency throttling against arbitrary attacker-supplied hosts, not quota
+        # exhaustion. A message with several links each queues its own URL at
+        # depth 0, which bypasses this value gate entirely (see
+        # ProviderPlanner._value_gate — depth-0 entities always earn a request);
+        # what actually bounds that case is PageCollector's own tight per-hop
+        # timeout and max redirect depth (krisis/collectors/page_collector.py),
+        # not this policy.
+        "page": ProviderPolicy(
+            name="page",
+            broad_enrichment=False,
+            cache_ttl_seconds=_env_float("KRISIS_PAGE_CACHE_TTL", 1800.0),
+            rate_per_minute=_env_int("KRISIS_PAGE_RATE_PER_MIN", 10),
+            daily_quota=_env_int("KRISIS_PAGE_DAILY_QUOTA", 2000),
+            min_pivot_priority=_env_float("KRISIS_PAGE_MIN_PIVOT_PRIORITY", 0.6),
+        ),
         "virustotal": ProviderPolicy(
             name="virustotal",
             broad_enrichment=False,
@@ -155,4 +174,6 @@ def default_collectors(
         # Last: by now the seed's own DNS/WHOIS answers are already in the planner's
         # session cache, so identity verification reuses them instead of re-asking.
         IdentityCollector(probe=probe, references=lambda: identity_references(storage)),
+        PageCollector(),
+        MessageCollector(),
     ]

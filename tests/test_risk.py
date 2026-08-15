@@ -1,7 +1,9 @@
 import unittest
 
 from krisis.core.correlation import CorrelationResult
-from krisis.core.models import Entity, EntityType, Evidence, Independence, Polarity
+from krisis.core.models import (
+    Coverage, Entity, EntityType, Evidence, Independence, Polarity, RiskCategory,
+)
 from krisis.core.risk import RiskEngine
 
 
@@ -105,6 +107,63 @@ class TestRiskEngine(unittest.TestCase):
         )
         self.assertGreater(result.score, 0)
         self.assertTrue(any("historical" in c for c in result.top_contributors))
+
+
+class TestSecuritySignalInteraction(unittest.TestCase):
+    """The combination of brand-impersonation + credential-collection evidence
+    must be materially stronger than the sum of its parts (see
+    risk.py::INTERACTION_BONUS_POINTS). Deleting that block should make
+    test_combined_signals_score_well_above_the_sum_of_the_parts fail while the
+    other tests here keep passing."""
+
+    def _score(self, *evidence):
+        engine = RiskEngine()
+        return engine.score(
+            CorrelationResult(supporting=list(evidence), contradicting=[], evidence_diversity=0.8)
+        ).score
+
+    def test_combined_signals_score_well_above_the_sum_of_the_parts(self):
+        impersonation = _ev("lookalike_domain", "identity", Polarity.SUPPORTS_THREAT, confidence=0.6)
+        credential = _ev("credential_form", "behavior", Polarity.SUPPORTS_THREAT, confidence=0.5)
+
+        only_impersonation = self._score(impersonation)
+        only_credential = self._score(credential)
+        combined = self._score(impersonation, credential)
+
+        # A margin this large is only reachable via the dedicated interaction
+        # bonus, not the ordinary additive weighting (which would land the
+        # combined score within a point or two of the sum, from rounding alone).
+        self.assertGreaterEqual(combined - only_impersonation - only_credential, 8)
+
+    def test_credential_form_alone_does_not_trigger_the_interaction_bonus(self):
+        only_credential = self._score(
+            _ev("credential_form", "behavior", Polarity.SUPPORTS_THREAT, confidence=0.5)
+        )
+        both_credential_signals = self._score(
+            _ev("credential_form", "behavior", Polarity.SUPPORTS_THREAT, confidence=0.5, source="a"),
+            _ev("external_form_action", "behavior", Polarity.SUPPORTS_THREAT, confidence=0.5, source="b"),
+        )
+        # Two behavior-only signals, no impersonation evidence: the interaction
+        # bonus must not fire just because there happen to be two of them.
+        self.assertLess(both_credential_signals - only_credential, 8)
+
+    def test_brand_domain_mismatch_does_not_inherit_the_verified_identity_carveout(self):
+        """brand_domain_mismatch is an unverified page/domain-name comparison, not
+        the verified (resolves + established + different-operator) relationship
+        identity_collector.py produces. It must be evidence_type='behavior', not
+        'identity', or every ordinary title/domain mismatch would be forced out of
+        LOW by risk.py's identity carve-out — see page_collector.py."""
+        engine = RiskEngine()
+        coverage = Coverage(
+            attempted={"virustotal"}, available={"virustotal"}, evidence_types={"reputation"}
+        )
+        correlation = CorrelationResult(
+            supporting=[_ev("brand_domain_mismatch", "behavior", Polarity.SUPPORTS_THREAT, confidence=0.2)],
+            contradicting=[],
+            evidence_diversity=0.1,
+        )
+        result = engine.score(correlation, coverage=coverage)
+        self.assertEqual(result.category, RiskCategory.LOW)
 
 
 if __name__ == "__main__":
