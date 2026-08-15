@@ -4,6 +4,7 @@ from krisis.core.correlation import CorrelationResult
 from krisis.core.models import (
     Coverage, Entity, EntityType, Evidence, Independence, Polarity, RiskCategory,
 )
+from krisis.core.recommend import recommend_action
 from krisis.core.risk import RiskEngine
 
 
@@ -163,6 +164,86 @@ class TestSecuritySignalInteraction(unittest.TestCase):
             evidence_diversity=0.1,
         )
         result = engine.score(correlation, coverage=coverage)
+        self.assertEqual(result.category, RiskCategory.LOW)
+
+
+class TestHistoricalMaliciousFloor(unittest.TestCase):
+    """Regression for KRISIS validation-matrix case 16: a near-perfect historical
+    resemblance to a case a human confirmed malicious used to be reported LOW
+    ("no strong evidence of malicious activity was found") while
+    top_contributors simultaneously named that very match as its #1 contributor
+    -- see risk.py's HISTORICAL_MALICIOUS_FLOOR_SIMILARITY / historical-floor
+    check, deliberately modeled on the existing impersonation/flagged checks."""
+
+    def _clean_coverage(self) -> Coverage:
+        return Coverage(attempted={"virustotal"}, available={"virustotal"}, evidence_types={"reputation"})
+
+    def _score_with_history(self, historical_similarity, contradicting=None):
+        engine = RiskEngine()
+        correlation = CorrelationResult(
+            supporting=[],
+            contradicting=contradicting or [],
+            neutral=[_ev("no_detections", "reputation", Polarity.NEUTRAL, confidence=0.3)],
+            evidence_diversity=0.5,
+        )
+        return engine.score(
+            correlation, coverage=self._clean_coverage(), historical_similarity=historical_similarity
+        )
+
+    def test_strong_historical_match_to_confirmed_malicious_is_not_reported_low(self):
+        result = self._score_with_history({
+            "similarity": 1.0,
+            "pattern_name": "shared certificate cluster",
+            "prior_outcome": "confirmed_malicious",
+            "match_type": "indicator",
+        })
+        self.assertEqual(result.category, RiskCategory.MEDIUM)
+        self.assertIn("confirmed malicious", result.uncertainty["reason"])
+
+    def test_category_top_contributor_and_recommendation_stay_consistent(self):
+        """The exact inconsistency case 16 exhibited: category, top_contributors,
+        and the rendered recommendation text must all agree with each other."""
+        result = self._score_with_history({
+            "similarity": 1.0,
+            "pattern_name": "known-malicious cluster",
+            "prior_outcome": "confirmed_malicious",
+            "match_type": "indicator",
+        })
+        self.assertTrue(any("historical" in c for c in result.top_contributors))
+        self.assertNotEqual(result.category, RiskCategory.LOW)
+        text = recommend_action(result)
+        self.assertNotIn("No strong evidence of malicious activity was found", text)
+        self.assertIn("confirmed malicious", text)
+
+    def test_weak_historical_match_does_not_force_the_floor(self):
+        """Do not blindly escalate every historical match -- only a strong one."""
+        result = self._score_with_history({
+            "similarity": 0.5, "pattern_name": "loosely similar shape", "prior_outcome": "unknown",
+        })
+        self.assertEqual(result.category, RiskCategory.LOW)
+
+    def test_strong_similarity_to_an_unvalidated_prior_case_does_not_force_the_floor(self):
+        """A pattern KRISIS has only observed, never had confirmed by a human, is a
+        lead, not proof (see PATTERN POISONING RESISTANCE) -- must not force a
+        verdict no matter how similar it looks."""
+        result = self._score_with_history({
+            "similarity": 1.0, "pattern_name": "unvalidated shape", "prior_outcome": "unknown",
+        })
+        self.assertEqual(result.category, RiskCategory.LOW)
+
+    def test_strong_current_contradicting_evidence_suppresses_the_historical_floor(self):
+        """Current evidence showing this artifact is actually operated by the
+        legitimate party it resembles (e.g. reclaimed infrastructure) must be
+        allowed to outrank a possibly-stale historical match."""
+        result = self._score_with_history(
+            {"similarity": 1.0, "pattern_name": "shared cert", "prior_outcome": "confirmed_malicious"},
+            contradicting=[_ev("same_operator_variant", "identity", Polarity.CONTRADICTS_THREAT, confidence=0.9)],
+        )
+        self.assertEqual(result.category, RiskCategory.LOW)
+
+    def test_no_historical_match_is_unaffected(self):
+        """Baseline: with no historical_similarity at all, behavior is unchanged."""
+        result = self._score_with_history(None)
         self.assertEqual(result.category, RiskCategory.LOW)
 
 

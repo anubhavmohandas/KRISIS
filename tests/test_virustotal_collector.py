@@ -108,6 +108,86 @@ class TestIPReputationIsChecked(unittest.TestCase):
         self.assertEqual(result.evidence[0].signal, "no_detections")
 
 
+class TestAncillaryDataDoesNotSuppressTheReputationVerdict(unittest.TestCase):
+    """Regression: a domain/IP VirusTotal has ancillary data about (subdomains,
+    historical resolutions) but has never seen a flagged URL on -- the normal
+    shape for most legitimate, popular artifacts -- used to produce ZERO
+    reputation-typed evidence, because the no_detections fallback only fired when
+    the evidence list was *completely* empty. That made
+    coverage.has_reputation_source() read False even though VirusTotal was
+    configured, reachable, and answered, so RiskEngine reported "no
+    threat-reputation source was available" for an artifact VT had just checked.
+    See KRISIS validation-matrix cases 1 (wikipedia.org) and 12 (mozilla.org)."""
+
+    DOMAIN_PAYLOAD = {
+        "response_code": 1,
+        "subdomains": ["www.example.test", "mail.example.test"],
+        "resolutions": [{"ip_address": "93.184.216.34", "last_resolved": "2024-01-01"}],
+    }
+
+    def test_a_domain_with_only_ancillary_data_still_produces_reputation_evidence(self):
+        result = _collect(self.DOMAIN_PAYLOAD)
+        self.assertTrue(result.available)
+        reputation = [e for e in result.evidence if e.evidence_type == "reputation"]
+        self.assertTrue(
+            reputation,
+            "expected a reputation-typed evidence item even though detected_urls "
+            "and categories were both absent",
+        )
+        self.assertEqual(reputation[0].signal, "no_detections")
+        self.assertEqual(reputation[0].polarity, Polarity.NEUTRAL)
+
+    def test_infrastructure_evidence_is_still_reported_alongside_it(self):
+        result = _collect(self.DOMAIN_PAYLOAD)
+        signals = {e.signal for e in result.evidence}
+        self.assertIn("vt_related_domain", signals)
+        self.assertIn("vt_communicating_ip", signals)
+
+    def test_an_ip_with_only_ancillary_resolutions_still_produces_reputation_evidence(self):
+        payload = {
+            "response_code": 1,
+            "resolutions": [{"hostname": "ordinary-site.test", "last_resolved": "2024-01-01"}],
+        }
+        result = _collect(payload, entity_type=EntityType.IP, value="8.8.4.4")
+        reputation = [e for e in result.evidence if e.evidence_type == "reputation"]
+        self.assertTrue(reputation)
+        self.assertEqual(reputation[0].signal, "no_detections")
+
+    def test_actual_detections_still_take_priority_over_the_fallback(self):
+        """Guards against a broken fix that always appends no_detections regardless
+        of reputation_recorded -- a domain WITH real detections must report exactly
+        one reputation item, the real one, not a second neutral one alongside it."""
+        result = _collect(TestDomainReputationIsCheckable.PAYLOAD)
+        reputation = [e for e in result.evidence if e.evidence_type == "reputation"]
+        self.assertEqual(len(reputation), 1)
+        self.assertEqual(reputation[0].signal, "malicious_detection")
+
+
+class TestFourDistinctAvailabilityStates(unittest.TestCase):
+    """provider unavailable / provider skipped / queried-clean / queried-flagged
+    must stay four distinct, individually observable states. "Skipped" is a
+    ProviderPlanner decision (see test_provider_planner.py), not a collector
+    concern, so only the collector-level three are exercised here."""
+
+    def test_no_api_key_is_unavailable_not_a_clean_result(self):
+        collector = VirusTotalCollector(api_key=None)
+        result = collector.collect(Entity(value="example.test", type=EntityType.DOMAIN))
+        self.assertFalse(result.available)
+        self.assertIn("no VirusTotal API key", result.note)
+        self.assertEqual(result.evidence, [])
+
+    def test_queried_with_no_malicious_findings_is_available_with_neutral_reputation_evidence(self):
+        result = _collect({"response_code": 1})
+        self.assertTrue(result.available)
+        self.assertEqual(result.evidence[0].evidence_type, "reputation")
+        self.assertEqual(result.evidence[0].polarity, Polarity.NEUTRAL)
+
+    def test_queried_with_malicious_findings_is_available_with_supporting_reputation_evidence(self):
+        result = _collect(TestDomainReputationIsCheckable.PAYLOAD)
+        reputation = next(e for e in result.evidence if e.evidence_type == "reputation")
+        self.assertEqual(reputation.polarity, Polarity.SUPPORTS_THREAT)
+
+
 class TestUnavailableIsNotClean(unittest.TestCase):
     def test_no_data_for_the_artifact_is_reported_as_unavailable(self):
         result = _collect({"response_code": 0})

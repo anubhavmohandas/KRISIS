@@ -63,6 +63,14 @@ class VirusTotalCollector(EvidenceCollector):
         data = resp.json()
 
         evidence: list[Evidence] = []
+        # Tracked separately from `evidence`: subdomains/resolutions are
+        # infrastructure-typed, not reputation-typed, so a domain VT has ancillary
+        # data about but never saw a flagged URL on must still get a reputation
+        # verdict — "if not evidence" used to skip the no_detections fallback
+        # whenever *any* ancillary evidence existed, silently reporting a live,
+        # answering VirusTotal as "no threat-reputation source was available"
+        # (see coverage.has_reputation_source() in risk.py).
+        reputation_recorded = False
 
         detected_urls = data.get("detected_urls", [])
         if detected_urls:
@@ -78,6 +86,7 @@ class VirusTotalCollector(EvidenceCollector):
                     subject=f"engine checks across {len(detected_urls)} known URLs on this domain",
                 )
             )
+            reputation_recorded = True
 
         for sub in data.get("subdomains", [])[:15]:
             evidence.append(
@@ -125,8 +134,13 @@ class VirusTotalCollector(EvidenceCollector):
                     provenance="VirusTotal category classification flags this domain",
                 )
             )
+            reputation_recorded = True
 
-        if not evidence:
+        # Emitted whenever no *reputation* verdict was produced above, regardless of
+        # whether infrastructure-typed evidence (subdomains/resolutions) exists —
+        # a domain VT has data about but never flagged a URL on is a real, clean
+        # reputation check, not an unanswered one.
+        if not reputation_recorded:
             evidence.append(
                 Evidence(
                     source=self.name,
@@ -155,6 +169,9 @@ class VirusTotalCollector(EvidenceCollector):
         data = resp.json()
 
         evidence: list[Evidence] = []
+        # See the identical tracking in _collect_domain: resolutions are
+        # infrastructure-typed, so they must not suppress the reputation fallback.
+        reputation_recorded = False
 
         detected_urls = data.get("detected_urls", [])
         if detected_urls:
@@ -166,6 +183,7 @@ class VirusTotalCollector(EvidenceCollector):
                     subject=f"engine checks across {len(detected_urls)} known URLs on this IP",
                 )
             )
+            reputation_recorded = True
 
         # Domains that have historically resolved to this IP — the reverse of a
         # domain report's own "resolutions" field. Reuses vt_related_domain/
@@ -190,7 +208,7 @@ class VirusTotalCollector(EvidenceCollector):
                     )
                 )
 
-        if not evidence:
+        if not reputation_recorded:
             evidence.append(
                 Evidence(
                     source=self.name,

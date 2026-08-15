@@ -66,6 +66,17 @@ OUTCOME_TRUST: dict[str, float] = {
 
 MIN_SIMILARITY_FOR_SCORING = 0.6
 
+# How strong a historical resemblance must be, to a *human-confirmed* malicious
+# prior case, before KRISIS refuses to call the current artifact LOW the same way
+# it already refuses for live identity impersonation and a live reputation flag
+# (see the impersonation/flagged checks in _categorize below). Deliberately higher
+# than MIN_SIMILARITY_FOR_SCORING: that threshold only gates whether history is
+# worth *any* points; this one gates whether it is strong enough to make a
+# from-scratch safety claim indefensible. 0.75 admits a near-exact match (e.g. an
+# identical certificate fingerprint) while excluding the merely-suggestive
+# structural coincidences two unrelated cases can share by chance.
+HISTORICAL_MALICIOUS_FLOOR_SIMILARITY = 0.75
+
 # Below this, a LOW/MEDIUM category is not actually earned: too little of the
 # intended evidence base answered for "looks safe" or "some suspicion" to be a
 # claim KRISIS can stand behind (see RISK VS CONFIDENCE — they are allowed to
@@ -218,7 +229,7 @@ class RiskEngine:
         score = max(0, min(100, round(raw_score * diversity_factor)))
 
         category, uncertainty = self._categorize(
-            score, correlation, coverage, support_points, contra_points
+            score, correlation, coverage, support_points, contra_points, historical_similarity
         )
         if discounted:
             uncertainty["discounted_counter_evidence"] = discounted
@@ -285,6 +296,7 @@ class RiskEngine:
         coverage: Coverage,
         support_points: float,
         contra_points: float,
+        historical_similarity: Optional[dict] = None,
     ) -> tuple[RiskCategory, dict]:
         """Map a score to a category, but refuse to assert a benign verdict KRISIS
         did not actually earn. Returns (category, uncertainty_detail)."""
@@ -358,6 +370,25 @@ class RiskEngine:
             )
             return RiskCategory.MEDIUM, uncertainty
 
+        # A strong resemblance to a case a human actually confirmed malicious is a
+        # direct claim about this artifact too, exactly like the live-flag check
+        # above — it must carry the same floor, or the category can assert "no
+        # strong evidence" in the same breath top_contributors names that very
+        # match as its #1 contributor. Two things keep this from over-firing:
+        #   - prior_outcome must be human-CONFIRMED (outcome_trust >= 1.0), not
+        #     merely observed/repeated — an unvalidated pattern is a lead, not proof
+        #     (see PATTERN POISONING RESISTANCE), and must not force a verdict
+        #   - meaningful CURRENT counter-evidence (>= CONFLICT_MIN_POINTS) defers
+        #     to the present over a possibly-stale match: infrastructure gets
+        #     reclaimed, and identity_collector's same_operator_variant is exactly
+        #     the signal that should be allowed to outrank old history
+        historical_reason = self._historical_malicious_floor_reason(
+            historical_similarity, contra_points
+        )
+        if historical_reason:
+            uncertainty["reason"] = historical_reason
+            return RiskCategory.MEDIUM, uncertainty
+
         # ...and the artifact must actually have been checked for threat reputation.
         # "Nobody looked" must never render as "nothing found".
         if not coverage.has_reputation_source():
@@ -368,6 +399,34 @@ class RiskEngine:
             return RiskCategory.INSUFFICIENT_EVIDENCE, uncertainty
 
         return RiskCategory.LOW, uncertainty
+
+    @staticmethod
+    def _historical_malicious_floor_reason(
+        historical_similarity: Optional[dict], contra_points: float
+    ) -> Optional[str]:
+        """Why a historical match forces MEDIUM, or None if it does not apply.
+
+        See HISTORICAL_MALICIOUS_FLOOR_SIMILARITY above for the rationale behind
+        each gate. Returns a string only when all three hold: the resemblance is
+        strong, the prior case was human-confirmed, and current evidence does not
+        already substantially contradict it.
+        """
+        if not historical_similarity:
+            return None
+        similarity = historical_similarity.get("similarity", 0.0)
+        if similarity < HISTORICAL_MALICIOUS_FLOOR_SIMILARITY:
+            return None
+        if outcome_trust(historical_similarity.get("prior_outcome")) < 1.0:
+            return None
+        if contra_points >= CONFLICT_MIN_POINTS:
+            return None
+        pattern_name = historical_similarity.get("pattern_name", "a prior pattern")
+        return (
+            f"this artifact has a {similarity:.0%} historical resemblance to "
+            f"'{pattern_name}', a case a human confirmed malicious — a resemblance "
+            f"this strong to confirmed-malicious infrastructure cannot be reported "
+            f"as looking safe, even with clean current reputation"
+        )
 
     def _confidence(
         self,
