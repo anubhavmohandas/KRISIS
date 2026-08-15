@@ -72,6 +72,29 @@ CREATE TABLE IF NOT EXISTS case_patterns (
     pattern_id TEXT NOT NULL,
     PRIMARY KEY (case_id, pattern_id)
 );
+
+-- Provider responses, so re-asking a provider the same question inside its cache
+-- window costs nothing. fetched_at is kept because a cached answer must be
+-- reported as an observation from that moment, never as current intelligence.
+CREATE TABLE IF NOT EXISTS provider_cache (
+    provider TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    value TEXT NOT NULL,
+    fetched_at REAL NOT NULL,
+    payload_json TEXT NOT NULL,
+    PRIMARY KEY (provider, entity_type, value)
+);
+
+-- Every request actually spent, and every rate-limit response received. One
+-- append-only log answers all three budget questions by time window: requests in
+-- the last minute, requests today, and when the provider last pushed back.
+CREATE TABLE IF NOT EXISTS provider_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,
+    ts REAL NOT NULL,
+    kind TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_provider_events ON provider_events (provider, kind, ts);
 """
 
 # Columns added after the first release. SQLite has no "ADD COLUMN IF NOT EXISTS",
@@ -259,6 +282,64 @@ class Storage:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM patterns ORDER BY confirmed_count DESC").fetchall()
         return [dict(r) for r in rows]
+
+    # -- provider cache + budget ledger ----------------------------------------
+
+    def cache_get(self, provider: str, entity_type: str, value: str) -> Optional[dict[str, Any]]:
+        """The stored response, with the time it was fetched. Expiry is the planner's
+        decision, not storage's — the TTL is provider policy, and this table has no
+        business knowing it."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT fetched_at, payload_json FROM provider_cache "
+                "WHERE provider = ? AND entity_type = ? AND value = ?",
+                (provider, entity_type, value.lower()),
+            ).fetchone()
+        if not row:
+            return None
+        return {"fetched_at": row["fetched_at"], "payload": json.loads(row["payload_json"])}
+
+    def cache_put(self, provider: str, entity_type: str, value: str, fetched_at: float, payload: dict) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO provider_cache "
+                "(provider, entity_type, value, fetched_at, payload_json) VALUES (?, ?, ?, ?, ?)",
+                (provider, entity_type, value.lower(), fetched_at, json.dumps(payload)),
+            )
+
+    def record_provider_event(self, provider: str, kind: str, ts: float) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO provider_events (provider, ts, kind) VALUES (?, ?, ?)",
+                (provider, ts, kind),
+            )
+
+    def count_provider_events(self, provider: str, kind: str, since_ts: float) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM provider_events WHERE provider = ? AND kind = ? AND ts >= ?",
+                (provider, kind, since_ts),
+            ).fetchone()
+        return row["n"] if row else 0
+
+    def last_provider_event(self, provider: str, kind: str) -> Optional[float]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT MAX(ts) AS ts FROM provider_events WHERE provider = ? AND kind = ?",
+                (provider, kind),
+            ).fetchone()
+        return row["ts"] if row and row["ts"] is not None else None
+
+    def oldest_provider_event(self, provider: str, kind: str, since_ts: float) -> Optional[float]:
+        """When the earliest request still inside the window was made — i.e. when the
+        window will next free a slot."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT MIN(ts) AS ts FROM provider_events "
+                "WHERE provider = ? AND kind = ? AND ts >= ?",
+                (provider, kind, since_ts),
+            ).fetchone()
+        return row["ts"] if row and row["ts"] is not None else None
 
     def list_patterns_with_cases(self) -> list[dict[str, Any]]:
         """Every stored pattern, its parsed signature, and the cases that exhibited it.

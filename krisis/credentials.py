@@ -64,21 +64,23 @@ PROVIDER_KEYS: tuple[ProviderKey, ...] = (
         free_tier="Free tier: 4 requests/min, 500/day — enough for CLI investigations.",
     ),
     ProviderKey(
-        provider="anthropic",
-        env_var="ANTHROPIC_API_KEY",
-        label="Anthropic (AI explanation layer)",
-        purpose="Rewrites the completed investigation into plain-language prose. "
-                "It only ever explains evidence KRISIS already collected.",
+        provider="nvidia",
+        env_var="NVIDIA_API_KEY",
+        label="NVIDIA NIM (AI explanation layer)",
+        purpose="Rewrites the completed investigation into plain-language prose using "
+                "Nemotron. It only ever explains evidence KRISIS already collected, and "
+                "never sees the artifact — only the finished findings.",
         impact_if_missing="Explanations fall back to the built-in deterministic template. "
                           "Risk scoring, correlation and evidence are completely unaffected — "
                           "the AI layer never detects anything.",
-        signup_url="https://console.anthropic.com/settings/keys",
+        signup_url="https://build.nvidia.com",
         steps=(
-            "Open https://console.anthropic.com/settings/keys",
-            "Sign in and click 'Create Key'",
-            "Copy the key (it starts with 'sk-ant-')",
+            "Open https://build.nvidia.com and sign in",
+            "Open any model page and click 'Get API Key'",
+            "Copy the key (it starts with 'nvapi-')",
         ),
-        free_tier="Paid per-token; usage is a few hundred tokens per investigation.",
+        free_tier="Free credits on signup; usage is a few thousand tokens per investigation. "
+                  "Override the model with KRISIS_AI_MODEL.",
         is_evidence_source=False,
     ),
 )
@@ -218,25 +220,18 @@ def verify(spec: ProviderKey, value: str, timeout: int = 10) -> tuple[bool, str]
                 return True, "key accepted (rate limit reached during check)"
             return True, f"could not verify (HTTP {resp.status_code})"
 
-        if spec.provider == "anthropic":
-            resp = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": value,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": "claude-sonnet-4-6",
-                    "max_tokens": 1,
-                    "messages": [{"role": "user", "content": "hi"}],
-                },
+        if spec.provider == "nvidia":
+            from .config import ai_base_url
+
+            resp = requests.get(
+                f"{ai_base_url()}/models",
+                headers={"Authorization": f"Bearer {value}"},
                 timeout=timeout,
             )
             if resp.status_code == 200:
-                return True, "key verified against the Anthropic API"
+                return True, "key verified against the NVIDIA API"
             if resp.status_code in (401, 403):
-                return False, "Anthropic rejected this key (401/403)"
+                return False, "NVIDIA rejected this key (401/403)"
             return True, f"could not verify (HTTP {resp.status_code})"
     except Exception as exc:
         return True, f"could not verify (network error: {exc})"

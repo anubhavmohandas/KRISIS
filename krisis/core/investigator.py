@@ -29,6 +29,7 @@ from .graph import EntityGraph
 from .indicators import classify_seed, domain_from_url, extract_from_text
 from .models import Case, Coverage, Entity, EntityType, Evidence, Relationship
 from .pivot_engine import InvestigationBudget, PivotEngine
+from .provider_planner import ProviderPlanner
 from .recommend import recommend_action
 from .risk import RiskEngine, historical_impact
 
@@ -52,11 +53,17 @@ class Investigator:
         pattern_memory: PatternMemory,
         budget: Optional[InvestigationBudget] = None,
         explainer: Optional[Explainer] = None,
+        planner: Optional[ProviderPlanner] = None,
     ):
         self.collectors = collectors
         self.case_memory = case_memory
         self.pattern_memory = pattern_memory
         self.budget = budget or InvestigationBudget()
+        # Every provider request goes through the planner: it decides what is worth
+        # spending, reuses what was already asked, and records why anything was not
+        # consulted. Default has no storage, so it deduplicates within the run but
+        # keeps no cross-run cache — the CLI passes one wired to the case database.
+        self.planner = planner or ProviderPlanner()
         # The pivot engine consults indicator memory to recognise commodity
         # infrastructure by observation, not just by name.
         self.pivot_engine = PivotEngine(
@@ -126,10 +133,23 @@ class Investigator:
                     continue
 
                 fanout_counter[pivot.entity_value] += 1
+                source_evidence = case.evidence.get(pivot.source_evidence_id or "")
                 target_entity = Entity(
                     value=pivot.entity_value,
                     type=pivot.entity_type,
                     depth=pivot.depth,
+                    # Carried so the provider planner can tell a lead the threat
+                    # hypothesis depends on from one more discovered hostname. Without
+                    # it, a scarce provider is spent on whatever the graph happened to
+                    # reach rather than on what the investigation actually turns on.
+                    metadata={
+                        "pivot_priority": round(pivot.priority, 3),
+                        "supports_hypothesis": bool(
+                            source_evidence
+                            and source_evidence.polarity.value == "supports_threat"
+                        ),
+                        "pivot_reason": pivot.reason,
+                    },
                     # Anything reached *through* commodity infrastructure is itself
                     # commodity infrastructure: the IPs behind a shared mail provider
                     # belong to that provider, not to the artifact under investigation.
@@ -168,6 +188,12 @@ class Investigator:
         risk = self.risk_engine.score(correlation, historical_similarity=historical, coverage=coverage)
         case.risk = risk
         trace.log("risk_assessment", **risk.to_dict())
+
+        # Recorded before the explanation so the AI layer can be told what KRISIS spent
+        # and what it declined to spend, and before storage so the case answers "why
+        # was this provider not consulted?" when it is read back months later.
+        case.provider_usage = self.planner.usage_summary()
+        trace.log("provider_usage", **case.provider_usage)
 
         case.explanation = self.explainer.explain(case, graph, correlation)
         case.recommendation = recommend_action(risk)
@@ -224,11 +250,19 @@ class Investigator:
             if not self.budget.has_call_budget():
                 trace.log("budget_exhausted", limit="max_external_calls", collector=collector.name)
                 break
-            self.budget.register_call()
             if is_seed:
+                # Attempted, whatever the planner decides. A provider the planner
+                # declined to spend is a source that did not answer about the seed,
+                # and coverage exists precisely to stop that reading as "nothing found".
                 coverage.attempted.add(collector.name)
 
-            result = collector.collect(entity)
+            result, decision = self.planner.collect(collector, entity)
+            trace.log("provider_decision", **decision.to_dict())
+            # Only a request actually sent to a provider consumes the investigation's
+            # external-call budget — reusing a cached answer costs nobody anything.
+            if decision.action == "queried":
+                self.budget.register_call()
+
             if not result.available:
                 case.provider_failures.append(f"{collector.name} unavailable for {entity.value}: {result.note}")
                 trace.log("collector_unavailable", collector=collector.name, entity=entity.value, note=result.note)

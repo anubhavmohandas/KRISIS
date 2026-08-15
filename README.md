@@ -48,8 +48,9 @@ krisis setup --show                       # what's configured, what's skipped
 krisis investigate xyz.com --no-prompt    # never ask (scripts/CI)
 ```
 
-Environment variables (`VIRUSTOTAL_API_KEY`, `ANTHROPIC_API_KEY`) always take
-priority over the stored file.
+Environment variables (`VIRUSTOTAL_API_KEY`, `NVIDIA_API_KEY`) always take
+priority over the stored file. `NVIDIA_API_KEY` powers the explanation layer
+only — it explains a finished investigation and never contributes to one.
 
 Every collector is optional and independent: KRISIS runs with zero API keys and
 zero of the optional `dnspython` / `python-whois` / `ipwhois` / `pyOpenSSL`
@@ -93,15 +94,17 @@ graph explosion — see `krisis/core/pivot_engine.py::InvestigationBudget`.
 INPUT
   -> indicator extraction        krisis/core/indicators.py
   -> evidence collection         krisis/collectors/*  (provider-agnostic, each optional)
+  -> identity/lookalike analysis krisis/core/identity.py + collectors/identity_collector.py
   -> normalization                (done inside each collector -> krisis/core/models.py::Evidence)
   -> pivot generation/priority   krisis/core/pivot_engine.py
+  -> provider planning/budget    krisis/core/provider_planner.py
   -> investigation queue/budget  krisis/core/investigator.py
   -> entity/relationship graph   krisis/core/graph.py
   -> pattern + case memory       krisis/memory/*  (SQLite)
   -> correlation                 krisis/core/correlation.py
   -> supporting/contradicting    (part of correlation output)
   -> risk + confidence           krisis/core/risk.py   (deterministic, no LLM)
-  -> AI explanation              krisis/ai/explain.py  (template by default, optional LLM)
+  -> AI explanation              krisis/ai/explain.py  (template by default, optional Nemotron)
   -> recommended action          krisis/core/recommend.py
   -> case storage                krisis/memory/case_memory.py
   -> pattern/knowledge update    krisis/memory/pattern_memory.py + `krisis outcome`
@@ -252,14 +255,125 @@ match that feeds the score is the one with the most *impact* — resemblance ×
 outcome trust — not the one that merely resembles hardest, so a strong benign
 match cannot shadow a weaker match to a confirmed-malicious case.
 
+### Provider budgeting (`krisis/core/provider_planner.py`)
+
+Written in response to a real run. Two seeds fanned out into a dozen discovered
+entities, every collector ran against every one of them, and fourteen VirusTotal
+requests later the provider's rate limit answered for KRISIS. Discovering a quota
+by exhausting it is not budgeting.
+
+The planner now sits between pivot discovery and provider execution, and answers
+in order:
+
+```
+already asked this provider this exact question?     -> reuse, no request
+answered recently enough to still be true?           -> cache, no request
+is this entity worth a scarce request at all?        -> value gate
+inside the rate limit and the daily quota?           -> defer or skip
+did the provider just say back off?                  -> honour it
+```
+
+The value gate is the part that mattered most: a scarce provider is spent on the
+seed — the thing the user actually asked about — and otherwise only on a pivot
+strong enough *and* load-bearing for the threat hypothesis. A discovered
+subdomain no longer buys itself a reputation lookup. Measured on the same two
+targets that motivated this:
+
+```
+before   14 VirusTotal requests from 2 seeds, ending in a rate limit
+after     1 VirusTotal request per seed, 0 rate limits
+          re-running the same target: 0 requests, entirely from cache
+```
+
+Policy is configuration, never intelligence: request rates, daily quotas, cache
+lifetimes and the value threshold live in `config.provider_policies()` and are
+env-overridable (`KRISIS_VT_RATE_PER_MIN`, `KRISIS_VT_DAILY_QUOTA`,
+`KRISIS_VT_CACHE_TTL`, `KRISIS_VT_MIN_PIVOT_PRIORITY`, `KRISIS_CACHE_TTL`).
+Defaults match VirusTotal's free tier: 4 requests/minute, 500/day.
+
+Two rules hold the line on honesty. A request KRISIS declined to spend returns
+`available=False` with the reason, exactly like a provider outage — "not asked"
+can never become "nothing found". And a cached answer travels as evidence
+stamped `freshness=cached` with its age and original fetch time, so it cannot
+be read as current intelligence. Every decision appears in `--show-trace`, and
+the per-provider ledger prints on every run:
+
+```
+--- Provider Usage ---
+  dns            calls 0  cached 9  reused 9
+  virustotal     calls 0  cached 1  skipped 4
+      not spent: discovered entity below the value threshold for a scarce provider
+                 (pivot priority 0.53 < 0.70, and no evidence here supports the
+                 threat hypothesis)
+```
+
+### Identity intelligence (`krisis/core/identity.py`)
+
+The same live run scored `paypa1.com` as LOW / 0. KRISIS had investigated the
+infrastructure around the name and never looked at the name itself — and for
+consumer fraud, the name usually *is* the attack.
+
+Identity analysis derives candidate identities an artifact may be imitating by
+three general mechanisms, with no brand list anywhere:
+
+- **confusable characters** — glyphs chosen to be misread (`1` for `l`, Cyrillic
+  `а` for `a`, `rn` for `m`), plus punycode/IDN decoding. The mapping is strictly
+  one-directional, deceptive glyph -> the character it imitates, which is what
+  keeps a legitimate name from being accused of imitating a variant of itself.
+  Ambiguous glyphs keep every reading: `1` passes for both `l` and `i`, so
+  `netfl1x` is read as `netflix` as well as `netfllx`, and each reading is
+  verified separately.
+- **decoration tokens** — `<name>-login`, `secure-<name>`. The lexicon describes
+  how phishing hostnames are *built*, not who is impersonated, and is extendable
+  with `KRISIS_DECORATION_TOKENS`. Without a decoration word present,
+  `my-company.com` is just a hostname, not an impersonation of `company.com`.
+- **reference similarity** — near-identical labels against identities KRISIS
+  already knows: domains it has investigated before, plus anything in
+  `~/.krisis/identity_references.txt` (`KRISIS_IDENTITY_REFERENCES`).
+
+A derived candidate is a string observation, not a finding. Before KRISIS calls
+it evidence, three things must be verified against the world with cheap DNS and
+WHOIS lookups routed through the planner:
+
+```
+the referent resolves            -> else there is nothing to impersonate
+it is established and older      -> else the direction of imitation is unknown
+a different party operates it    -> else this is a defensive registration
+```
+
+That third check is not a formality. Investigating `paypa1.com` live, KRISIS
+derived `paypal.com`, then found both registered to `PayPal Inc.` — a defensive
+registration by the brand itself. The result is reported as *counter*-evidence,
+and the verdict stays LOW for a stated reason rather than by omission.
+
+When the checks pass, the relationship becomes evidence *and* a `looks_like`
+edge in the graph, so identity and infrastructure can reinforce each other. A
+verified impersonation also cannot be reported as LOW however unremarkable its
+hosting is (`risk.py::_categorize`), and a valid certificate does not offset it:
+a certificate proves control of an endpoint, not that its operator is the
+organization the name resembles.
+
+Live, `1inkedin.com` scores MEDIUM 39/100 with `lookalike_domain` as its top
+contributor, while `paypal.com` and `linkedin.com` produce no identity finding
+at all from the same mechanism.
+
 ### AI explanation layer
 
 Strictly downstream of the risk engine (`krisis/ai/explain.py`). Default mode
 builds the explanation directly from structured case data with no model call
-at all — zero hallucination risk. If `ANTHROPIC_API_KEY` is set, the same
-structured findings are sent to Claude with an explicit system prompt
-forbidding it from inventing or embellishing evidence; any failure falls back
-to the deterministic template.
+at all — zero hallucination risk. If `NVIDIA_API_KEY` is set, the same
+structured findings are sent to `nvidia/nemotron-3-super-120b-a12b` (override
+with `KRISIS_AI_MODEL`, endpoint with `KRISIS_AI_BASE_URL`) with a system prompt
+forbidding it from inventing evidence, disputing the score, or claiming a source
+was consulted; it answers as JSON (`summary`, `key_findings`, `uncertainties`,
+`recommended_actions`) and any failure falls back to the deterministic template.
+
+What it receives is a *summary* of the finished investigation — risk, the
+evidence that carried weight, counter-evidence, historical matches, uncertainty,
+provider usage — never the raw graph. A large context window is headroom, not a
+reason to make the model do the investigator's reading.
+
+    KRISIS investigates. The model translates.
 
 ## Testing
 
@@ -272,12 +386,14 @@ faked investigator). Run:
 python3 -m unittest discover -s tests -v
 ```
 
-118 tests covering: graph dedup/traversal, pivot budget/depth/noisy-fanout
+172 tests covering: graph dedup/traversal, pivot budget/depth/noisy-fanout
 enforcement, evidence polarity/diversity correlation, risk determinism/
 counter-evidence/diminishing-returns, provider-failure handling (never
-silently treated as "clean"), provider-payload normalization, and — the core
-differentiator — historical pattern matching that recognises a domain through
-shared infrastructure *or* through case structure alone, even when its current
+silently treated as "clean"), provider-payload normalization, provider
+budgeting (dedup, cache, TTL, rate limit, daily quota, backoff, value gate),
+identity derivation and verification, and — the core differentiator —
+historical pattern matching that recognises a domain through shared
+infrastructure *or* through case structure alone, even when its current
 VirusTotal reputation is clean.
 
 The count is not the point; **wrong-conclusion coverage** is. Every security
@@ -293,6 +409,17 @@ flagged artifact being called LOW, that rule firing on non-reputation evidence,
 the qualification being dropped from the advice, and the VirusTotal denominator
 regressing to the URL count.
 
+Added with provider budgeting and identity intelligence, each verified the same
+way — delete the rule, watch the named test fail: provider deduplication, the
+cross-run cache, stale cache being reused as fresh, cached evidence losing its
+`cached` stamp, the rate limiter, the daily quota, rate-limit backoff, the value
+gate, a skipped request reporting as available, one-directional glyph mapping,
+dropping the secondary reading of an ambiguous glyph, the decoration-lexicon
+test, the referent-resolves check, the age-margin check, same-operator
+suppression, the identity risk floor, valid TLS offsetting an identity finding,
+the `looks_like` pivot rule, and an impersonated identity being dismissed as
+commodity infrastructure because it appears in many prior cases.
+
 ## Current scope and honest limitations
 
 This is the first working slice of the full loop described in the design
@@ -301,23 +428,37 @@ docs, not the finished system. Implemented for real, end to end:
 - URL/domain/IP/hash/message investigation with real indicator extraction
 - DNS, WHOIS, TLS, IP/ASN, and VirusTotal collectors (each independently optional)
 - Budget-limited pivot engine with accept/reject reasoning
+- Provider planner: per-provider policy, cross-run response cache, in-run
+  deduplication, sliding-window rate limiting, daily quota, rate-limit backoff,
+  and a value gate that reserves scarce providers for leads worth them
+- Identity analysis: confusable/homoglyph/IDN and decoration-token derivation,
+  verified against resolution, registration age and operator before it becomes
+  evidence, and entering the graph as a `looks_like` edge
 - Entity/relationship graph with ASCII visualization (`--show-graph`)
 - Correlation engine (supporting/contradicting/infrastructure-overlap/diversity)
 - Deterministic risk engine with documented weights
 - SQLite case + indicator memory, with historical matching on both concrete
   indicators and case structure
 - Learning loop via `krisis outcome` (feeds back into future matching)
-- Template-based explanation (always) + optional LLM explanation
+- Template-based explanation (always) + optional Nemotron explanation over an
+  OpenAI-compatible endpoint, receiving a summary rather than the raw case
 - Advisory-only recommendation engine
 
 Not yet implemented (explicitly out of scope for this pass, see design docs
 §25 and self-critique checklist):
 
-- URL-scanning/redirect-chain collector and brand-impersonation heuristics.
-  Structural signatures are built from whatever signals the collectors emit, so
-  such a collector would enter the signature automatically — but until one
-  exists, the "brand impersonation + credential harvesting" shape cannot be
-  recognised, because nothing observes it
+- URL-scanning/redirect-chain collector. Identity evidence now enters structural
+  signatures automatically, so the "brand impersonation + credential harvesting"
+  shape is half observable — the impersonation half. Nothing yet observes the
+  credential-harvesting half, because no collector fetches the page
+- Referent *legitimacy*. The identity layer verifies that a referent is
+  established, resolving and separately operated; it cannot tell a legitimate
+  brand from an older squatter, so `1inkedin.com` is reported as resembling both
+  `linkedin.com` and `iinkedin.com`. Both statements are true; only one is
+  interesting. Populating `identity_references.txt` is the current answer
+- Registrant organisations are compared as plain strings, so `PayPal Inc.` and
+  `PayPal, Inc` read as different owners. The failure direction is a retained
+  finding rather than a suppressed one
 - Temporal shape (burst timing, ordering of first-seen events) as a signature
   dimension; the timestamps are stored, but the signature does not read them yet
 - Cases stored before structural matching existed contribute indicators only.

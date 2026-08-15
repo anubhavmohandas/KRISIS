@@ -28,6 +28,12 @@ NOISY_FANOUT_THRESHOLD = 25
 # following it drags thousands of unrelated organizations into the same cluster.
 COMMODITY_RELATIONS = frozenset({"uses_mailserver", "uses_nameserver", "cname_to"})
 
+# Identity relations are exempt from the "seen in many prior cases" commodity test.
+# A widely-impersonated identity appears in many unrelated investigations *because*
+# it is worth impersonating; treating that as commodity infrastructure would delete
+# the strongest edge in the case exactly when the identity matters most.
+IDENTITY_RELATIONS = frozenset({"looks_like"})
+
 # How hard a third-party commodity pivot is down-weighted. Not zero: shared hosting
 # genuinely matters when the *seed itself* is suspicious, so the pivot survives as a
 # low-priority candidate rather than being silently dropped.
@@ -75,6 +81,7 @@ PIVOT_RULES: dict[str, tuple[EntityType, str, float, str]] = {
     "vt_related_domain": (EntityType.DOMAIN, "vt_related", 0.7, "VirusTotal reports a direct relationship"),
     "vt_communicating_ip": (EntityType.IP, "vt_related", 0.65, "VirusTotal reports this IP as related"),
     "redirect_target": (EntityType.URL, "redirects_to", 0.7, "observed redirect destination"),
+    "lookalike_domain": (EntityType.DOMAIN, "looks_like", 0.6, "artifact resembles this established identity"),
 }
 
 
@@ -173,7 +180,7 @@ class PivotEngine:
                 f"domain that registrar handles"
             )
 
-        if self.case_count_lookup:
+        if self.case_count_lookup and pivot.relation_type not in IDENTITY_RELATIONS:
             try:
                 seen_in = self.case_count_lookup(pivot.entity_type.value, pivot.entity_value)
             except Exception:

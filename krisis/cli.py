@@ -23,7 +23,7 @@ import sys
 import click
 
 from . import credentials
-from .config import default_collectors
+from .config import build_planner, default_collectors
 from .core.investigator import Investigator
 from .core.models import Outcome, RiskCategory
 from .core.recommend import INDECISIVE
@@ -196,11 +196,16 @@ def _build_investigator(db_path: str, max_depth: int, max_entities: int, max_ext
     budget = InvestigationBudget(
         max_depth=max_depth, max_entities=max_entities, max_external_calls=max_external_calls
     )
+    # The planner shares the case database: provider caching and rate accounting have
+    # to survive process exit, or every CLI invocation starts its quota from zero and
+    # rediscovers the provider's limit the hard way.
+    planner = build_planner(storage)
     return Investigator(
-        collectors=default_collectors(),
+        collectors=default_collectors(planner=planner, storage=storage),
         case_memory=case_memory,
         pattern_memory=pattern_memory,
         budget=budget,
+        planner=planner,
     )
 
 
@@ -278,6 +283,7 @@ def investigate(
     if show_trace:
         _render_trace(trace)
 
+    _render_provider_usage(case)
     _render_source_status()
 
     if case.provider_failures:
@@ -460,6 +466,27 @@ def _render_patterns(case) -> None:
             click.echo(f"      shared indicators: {', '.join(m['matched_indicators'])}")
         if m.get("matched_facets"):
             click.echo(f"      shared structure:  {', '.join(m['matched_facets'])}")
+
+
+def _render_provider_usage(case) -> None:
+    """What each provider cost this investigation, and what KRISIS chose not to spend.
+
+    Shown by default rather than behind a flag: the live runs that motivated the
+    planner burned a provider's quota without anything in the output saying so.
+    """
+    if not case.provider_usage:
+        return
+    click.echo("\n--- Provider Usage ---")
+    for name, usage in case.provider_usage.items():
+        parts = [f"calls {usage['calls']}"]
+        for label, key in (("cached", "cached"), ("reused", "deduplicated"),
+                           ("skipped", "skipped"), ("rate limited", "rate_limited")):
+            if usage.get(key):
+                parts.append(f"{label} {usage[key]}")
+        click.echo(f"  {name:<14} " + "  ".join(parts))
+        for reason in usage.get("skip_reasons", []):
+            for i, line in enumerate(click.wrap_text(reason, width=70).splitlines()):
+                click.secho(f"      {'not spent: ' if i == 0 else '           '}{line}", fg="bright_black")
 
 
 def _render_graph(graph) -> None:

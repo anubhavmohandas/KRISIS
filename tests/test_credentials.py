@@ -27,7 +27,7 @@ class CredentialStoreTestCase(unittest.TestCase):
         patcher_cwd = mock.patch("os.getcwd", return_value=self.cwd)
         patcher_cwd.start()
         self.addCleanup(patcher_cwd.stop)
-        for var in ("VIRUSTOTAL_API_KEY", "ANTHROPIC_API_KEY"):
+        for var in ("VIRUSTOTAL_API_KEY", "NVIDIA_API_KEY"):
             os.environ.pop(var, None)
 
 
@@ -68,9 +68,9 @@ class TestResolution(CredentialStoreTestCase):
 
     def test_saving_one_key_preserves_the_others(self):
         credentials.save("VIRUSTOTAL_API_KEY", "vt-key")
-        credentials.save("ANTHROPIC_API_KEY", "sk-ant-key")
+        credentials.save("NVIDIA_API_KEY", "nvapi-key")
         self.assertEqual(credentials.resolve("VIRUSTOTAL_API_KEY"), "vt-key")
-        self.assertEqual(credentials.resolve("ANTHROPIC_API_KEY"), "sk-ant-key")
+        self.assertEqual(credentials.resolve("NVIDIA_API_KEY"), "nvapi-key")
 
 
 class TestStoragePermissions(CredentialStoreTestCase):
@@ -144,17 +144,21 @@ class TestProviderRegistry(unittest.TestCase):
     def test_ai_layer_is_not_registered_as_an_evidence_source(self):
         """The AI layer explains a finished investigation; it never contributes
         evidence. Listing it as a source would misrepresent the architecture."""
-        anthropic = credentials.PROVIDER_KEYS_BY_NAME["anthropic"]
-        self.assertFalse(anthropic.is_evidence_source)
+        ai_layer = credentials.PROVIDER_KEYS_BY_NAME["nvidia"]
+        self.assertFalse(ai_layer.is_evidence_source)
         self.assertTrue(credentials.PROVIDER_KEYS_BY_NAME["virustotal"].is_evidence_source)
 
     def test_every_registered_key_is_actually_consumed_somewhere(self):
         """Guards against advertising a key that no component reads."""
         from krisis import config
-        from krisis.ai.explain import Explainer  # noqa: F401  (reads ANTHROPIC_API_KEY)
+        from krisis.ai.explain import Explainer  # noqa: F401  (reads NVIDIA_API_KEY)
 
-        self.assertIn("VIRUSTOTAL_API_KEY", {p.env_var for p in credentials.PROVIDER_KEYS})
+        registered = {p.env_var for p in credentials.PROVIDER_KEYS}
+        self.assertIn("VIRUSTOTAL_API_KEY", registered)
+        self.assertIn("NVIDIA_API_KEY", registered)
         self.assertTrue(hasattr(config, "virustotal_api_key"))
+        # The AI model is configured in one place, never scattered through the code.
+        self.assertTrue(config.ai_model())
 
 
 if __name__ == "__main__":

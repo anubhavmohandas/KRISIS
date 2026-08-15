@@ -84,6 +84,43 @@ def historical_impact(match: dict) -> float:
     """
     return (match.get("similarity") or 0.0) * outcome_trust(match.get("prior_outcome"))
 
+# Counter-evidence that establishes something narrower than it appears to. A
+# certificate proves control of the endpoint it was issued for; it says nothing
+# about whether the operator is the organization the name resembles, and any
+# attacker can obtain one in minutes. Letting it net off against an identity
+# finding would mean a phishing site could rebut "this imitates someone else" by
+# doing what every phishing site already does.
+NARROW_CONTRADICTIONS = frozenset({"valid_tls_present"})
+
+
+def _identity_support(supporting: list[Evidence]) -> list[Evidence]:
+    return [ev for ev in supporting if ev.evidence_type == "identity"]
+
+
+def _discount_narrow_contradictions(
+    supporting: list[Evidence], contradicting: list[Evidence]
+) -> tuple[list[Evidence], list[str]]:
+    """Drop counter-evidence from the arithmetic that does not actually counter what
+    was found. Returns (evidence that scores, notes explaining each exclusion).
+
+    The excluded items stay in the reported counter-evidence — the reader should see
+    everything KRISIS saw — they simply stop cancelling a finding they do not address.
+    """
+    if not _identity_support(supporting):
+        return contradicting, []
+    kept, notes = [], []
+    for ev in contradicting:
+        if ev.signal in NARROW_CONTRADICTIONS:
+            notes.append(
+                f"'{ev.signal}' ({ev.source}) is reported but does not offset the identity "
+                f"finding: a valid certificate proves control of this endpoint, not that its "
+                f"operator is the organization this name resembles"
+            )
+        else:
+            kept.append(ev)
+    return kept, notes
+
+
 # A supporting case must be at least this much stronger than the contradicting
 # case before KRISIS calls a verdict rather than reporting the disagreement.
 CONFLICT_RATIO = 0.8
@@ -100,7 +137,10 @@ class RiskEngine:
     ) -> RiskAssessment:
         coverage = coverage or Coverage()
         support_points, support_contributors = self._weighted_points(correlation.supporting)
-        contra_points, _ = self._weighted_points(correlation.contradicting)
+        scoring_contradictions, discounted = _discount_narrow_contradictions(
+            correlation.supporting, correlation.contradicting
+        )
+        contra_points, _ = self._weighted_points(scoring_contradictions)
 
         # Historical pattern similarity to prior cases is folded in as its own
         # contributor, separate from current reputation (see CURRENT VS HISTORICAL
@@ -133,6 +173,8 @@ class RiskEngine:
         category, uncertainty = self._categorize(
             score, correlation, coverage, support_points, contra_points
         )
+        if discounted:
+            uncertainty["discounted_counter_evidence"] = discounted
         confidence = self._confidence(correlation, historical_similarity, coverage)
 
         # Rank by actual contribution, not alphabetically — "top contributors" has
@@ -219,7 +261,23 @@ class RiskEngine:
             return RiskCategory.MEDIUM, uncertainty
 
         # Score is in the LOW band. Asserting LOW is a positive claim that the
-        # artifact looks safe, and there are two ways to have no right to make it.
+        # artifact looks safe, and there are three ways to have no right to make it.
+
+        # KRISIS established that this artifact imitates an established identity
+        # operated by somebody else. That is a determination about the artifact's own
+        # name — the part a victim actually reads — and it does not need corroborating
+        # infrastructure to matter. A lookalike domain reported as "looks safe" is the
+        # exact failure that made paypa1.com score LOW/0 before identity analysis existed.
+        impersonation = _identity_support(correlation.supporting)
+        if impersonation:
+            resembles = ", ".join(sorted({str(ev.value) for ev in impersonation}))
+            uncertainty["reason"] = (
+                f"this artifact's name imitates an established identity operated by someone "
+                f"else ({resembles}); the surrounding infrastructure looks unremarkable, which "
+                f"is why the score stays low, but an artifact impersonating another identity "
+                f"cannot be reported as looking safe"
+            )
+            return RiskCategory.MEDIUM, uncertainty
 
         # A threat-reputation source examined this artifact and flagged it. That is a
         # direct determination about the artifact itself, not circumstantial evidence,

@@ -170,6 +170,12 @@ class Evidence:
     observed_at: str = field(default_factory=_now)
     provenance: str = ""             # human-readable "why we believe this"
     raw: Optional[dict[str, Any]] = None   # original provider payload, for audit only
+    # When the provider actually answered, as opposed to when KRISIS used the answer.
+    # A cached result is still evidence, but it is evidence about the moment it was
+    # fetched — presenting it as current intelligence would be a lie of omission.
+    fetched_at: str = ""             # "" means same as observed_at (fetched live)
+    freshness: str = "live"          # live | cached
+    cache_age_seconds: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -184,6 +190,9 @@ class Evidence:
             "independence": self.independence.value,
             "observed_at": self.observed_at,
             "provenance": self.provenance,
+            "fetched_at": self.fetched_at or self.observed_at,
+            "freshness": self.freshness,
+            "cache_age_seconds": self.cache_age_seconds,
         }
 
 
@@ -289,6 +298,10 @@ class Case:
     recommendation: str = ""
     outcome: Optional[str] = None    # an Outcome value, or None while never validated
     provider_failures: list[str] = field(default_factory=list)
+    # Per-provider accounting: what was spent, reused, or deliberately not spent.
+    # Stored with the case because "why was this provider not consulted?" is part of
+    # the investigation record, not a runtime detail.
+    provider_usage: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -306,4 +319,5 @@ class Case:
             "recommendation": self.recommendation,
             "outcome": self.outcome,
             "provider_failures": self.provider_failures,
+            "provider_usage": self.provider_usage,
         }
