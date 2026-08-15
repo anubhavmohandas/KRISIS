@@ -359,6 +359,25 @@ Live, `1inkedin.com` scores MEDIUM 39/100 with `lookalike_domain` as its top
 contributor, while `paypal.com` and `linkedin.com` produce no identity finding
 at all from the same mechanism.
 
+**`.bank.in` namespace context.** India's RBI reserves `.bank.in` as a
+restricted second-level namespace for regulated banks and directs banks to
+migrate to it specifically to cut digital-payment phishing. `registrable_domain`
+(`krisis/core/indicators.py`) treats `bank.in` as a public-suffix-style
+namespace exactly like `co.in`, so `hdfc.bank.in` and `sbi.bank.in` register as
+two organizations rather than collapsing to the shared suffix. `IdentityCollector`
+then emits `verified_bank_namespace` as ordinary `CONTRADICTS_THREAT` identity
+evidence for an exact registrable match — never for a substring or subdomain
+trick (`hdfcbank.in`, `hdfc.bank.in.attacker.com`) and never for the bare
+namespace root (`bank.in`). It is real, risk-engine-weighted counter-evidence,
+not a safe override: a genuine impersonation + credential-form finding on a
+`.bank.in` domain still out-scores it (see `TestBankNamespaceSignal` in
+`tests/test_identity.py` and `TestBankInNamespace` in
+`tests/test_commodity_infrastructure.py`, both mutation-tested). Institution
+identity (does *this* `.bank.in` domain actually match the brand a page
+claims?) needs no bank-specific code at all — it falls out of the existing,
+generic `brand_domain_mismatch` check in `page_collector.py` once
+`registrable_domain` parses the suffix correctly.
+
 ### AI explanation layer
 
 Strictly downstream of the risk engine (`krisis/ai/explain.py`). Default mode

@@ -15,7 +15,7 @@ import tempfile
 import unittest
 
 from krisis.core.graph import EntityGraph
-from krisis.core.indicators import registrable_domain, same_organization
+from krisis.core.indicators import is_bank_in_namespace, registrable_domain, same_organization
 from krisis.core.models import Case, Entity, EntityType, Evidence, Polarity
 from krisis.core.pivot_engine import InvestigationBudget, PivotEngine
 from krisis.memory.case_memory import CaseMemory
@@ -46,6 +46,45 @@ class TestRegistrableDomain(unittest.TestCase):
     def test_same_organization(self):
         self.assertTrue(same_organization("github.com", "mail.github.com"))
         self.assertFalse(same_organization("github.com", "github-com.mail.protection.outlook.com"))
+
+
+class TestBankInNamespace(unittest.TestCase):
+    """RBI reserves .bank.in as a restricted second-level namespace for regulated
+    banks. Boundary correctness matters more than for an ordinary suffix: a loose
+    match here would let an attacker borrow the namespace's trust just by putting
+    the string 'bank.in' anywhere in a hostname.
+    """
+
+    def test_bank_in_is_a_registrable_suffix_like_co_in(self):
+        """Delete 'bank.in' from _MULTI_LABEL_SUFFIXES and two unrelated banks'
+        domains collapse to the shared suffix 'bank.in', which would make
+        same_organization() report them as one operator."""
+        self.assertEqual(registrable_domain("hdfc.bank.in"), "hdfc.bank.in")
+        self.assertEqual(registrable_domain("netbanking.hdfc.bank.in"), "hdfc.bank.in")
+        self.assertFalse(same_organization("hdfc.bank.in", "sbi.bank.in"))
+
+    def test_an_institution_under_the_namespace_is_recognized(self):
+        self.assertTrue(is_bank_in_namespace("hdfc.bank.in"))
+        self.assertTrue(is_bank_in_namespace("HDFC.BANK.IN"))
+        self.assertTrue(is_bank_in_namespace("netbanking.hdfc.bank.in"))
+
+    def test_the_bare_namespace_root_names_no_institution(self):
+        self.assertFalse(is_bank_in_namespace("bank.in"))
+
+    def test_a_label_or_substring_trick_is_not_the_namespace(self):
+        """Delete the exact-suffix check and 'contains bank.in' would pass —
+        exactly the contains("bank.in") -> safe shortcut the design forbids."""
+        self.assertFalse(is_bank_in_namespace("hdfcbank.in"))
+        self.assertFalse(is_bank_in_namespace("fakebank.in"))
+        self.assertFalse(is_bank_in_namespace("fake-bank.in"))
+
+    def test_the_namespace_used_only_as_a_subdomain_of_another_domain_is_rejected(self):
+        """The namespace must be the artifact's own suffix, not a label anywhere
+        in the name — an attacker's own domain must not borrow its trust by
+        tacking 'bank.in' on as a subdomain."""
+        self.assertFalse(is_bank_in_namespace("hdfc.bank.in.attacker.com"))
+        self.assertFalse(is_bank_in_namespace("bank.in.attacker.com"))
+        self.assertFalse(is_bank_in_namespace("fake.bank.in.attacker.com"))
 
 
 def _mx_evidence(entity_id, value):

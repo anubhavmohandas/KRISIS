@@ -18,6 +18,7 @@ from unittest import mock
 
 from krisis.ai.explain import Explainer
 from krisis.collectors.base import CollectorResult, EvidenceCollector
+from krisis.collectors.identity_collector import IdentityCollector
 from krisis.collectors.page_collector import PageCollector
 from krisis.core.investigator import Investigator
 from krisis.core.models import Entity, Evidence, Independence, Polarity
@@ -319,6 +320,46 @@ class TestSecuritySignalScenario(unittest.TestCase):
             any("combined" in c for c in case.risk.top_contributors),
             case.risk.top_contributors,
         )
+
+    def test_a_legitimate_bank_namespace_domain_is_not_flagged_as_phishing(self):
+        """Counterpart to the scenario above: an ordinary login page on its own
+        India .bank.in domain (invented institution 'GlorpBank', same reasoning
+        as 'GlorpTech' — no real bank is ever named in this mechanism) must not
+        be reported as phishing merely for having a password field. Exercises
+        IdentityCollector's verified_bank_namespace signal end to end alongside
+        the same PageCollector path as the phishing scenario, so the two prove
+        the mechanism cuts both ways.
+        """
+        page = _FakeHTTPResponse(status_code=200, body=(
+            '<html><head><meta property="og:site_name" content="GlorpBank">'
+            "<title>Sign in - GlorpBank</title></head><body>"
+            '<form method="post">'
+            '<input type="text" name="username">'
+            '<input type="password" name="password">'
+            "</form></body></html>"
+        ).encode("utf-8"))
+
+        investigator = Investigator(
+            collectors=[
+                PageCollector(), FakeDNSCollector(), FakeURLReputationCollector(),
+                IdentityCollector(probe=None),
+            ],
+            case_memory=self.case_memory,
+            pattern_memory=self.pattern_memory,
+            budget=InvestigationBudget(max_depth=0, max_entities=20, max_external_calls=50),
+            explainer=Explainer(use_llm=False),
+        )
+
+        with mock.patch(
+            "krisis.collectors.page_collector.socket.getaddrinfo", side_effect=_public_addrinfo
+        ), mock.patch("requests.get", side_effect=[page]):
+            case, _trace = investigator.investigate("https://glorpbank.bank.in/login")
+
+        signals = {e.signal for e in case.evidence.values()}
+        self.assertIn("verified_bank_namespace", signals)
+        self.assertNotIn("brand_domain_mismatch", signals)
+        self.assertNotIn("cross_domain_redirect", signals)
+        self.assertEqual(case.risk.category.value, "LOW")
 
 
 if __name__ == "__main__":

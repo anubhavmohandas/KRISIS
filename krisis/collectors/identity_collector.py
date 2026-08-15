@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from ..core.identity import LookalikeCandidate, candidates
-from ..core.indicators import registrable_domain
+from ..core.indicators import is_bank_in_namespace, registrable_domain
 from ..core.models import Entity, EntityType, Evidence, Independence, Polarity
 from .base import CollectorResult, EvidenceCollector
 
@@ -115,6 +115,12 @@ class IdentityCollector(EvidenceCollector):
         self.references = references or (lambda: set())
 
     def collect(self, entity: Entity) -> CollectorResult:
+        # Namespace context is evidence about this artifact's own domain, independent
+        # of whether it also happens to derive a lookalike candidate against someone
+        # else — so it is collected before, and regardless of, that derivation.
+        context = [self._bank_namespace_evidence(entity)]
+        context = [ev for ev in context if ev is not None]
+
         try:
             found = candidates(entity.value, self._references())
         except Exception as exc:
@@ -122,19 +128,19 @@ class IdentityCollector(EvidenceCollector):
 
         if not found:
             return CollectorResult(
-                evidence=[], available=True,
+                evidence=context, available=True,
                 note="no lookalike candidate derived from this name",
             )
 
         if self.probe is None:
             return CollectorResult(
-                evidence=[self._unverified(entity, c) for c in found[:MAX_CANDIDATES_VERIFIED]],
+                evidence=context + [self._unverified(entity, c) for c in found[:MAX_CANDIDATES_VERIFIED]],
                 available=True,
                 note="candidates derived but not verified (no probe configured)",
             )
 
         subject = self._facts(entity.value)
-        evidence: list[Evidence] = []
+        evidence: list[Evidence] = list(context)
         for candidate in found[:MAX_CANDIDATES_VERIFIED]:
             evidence.append(self._verdict(entity, candidate, subject))
         return CollectorResult(evidence=evidence, available=True)
@@ -242,6 +248,28 @@ class IdentityCollector(EvidenceCollector):
         if subject.age_days is not None:
             confidence += 0.1
         return round(min(0.9, confidence), 2)
+
+    def _bank_namespace_evidence(self, entity: Entity) -> Optional[Evidence]:
+        """India's RBI reserves .bank.in for regulated banks specifically to cut
+        digital-payment phishing (see indicators.is_bank_in_namespace). Membership
+        is real authenticity evidence about the *namespace*, weighed by the risk
+        engine like any other counter-evidence — never a safe/unsafe override, and
+        no claim about which specific institution operates this domain.
+        """
+        if not is_bank_in_namespace(entity.value):
+            return None
+        return Evidence(
+            source=self.name, entity_id=entity.id, signal="verified_bank_namespace",
+            value=registrable_domain(entity.value), evidence_type="identity",
+            polarity=Polarity.CONTRADICTS_THREAT, confidence=0.75,
+            independence=Independence.INDEPENDENT,
+            provenance=(
+                f"'{entity.value}' sits in India's restricted .bank.in namespace, which "
+                f"RBI reserves for regulated banks and directed banks to migrate to in "
+                f"order to reduce digital-payment phishing — this supports the namespace's "
+                f"authenticity, not that this specific institution, page, or message is safe"
+            ),
+        )
 
     def _unverified(self, entity: Entity, candidate: LookalikeCandidate, why: str = "") -> Evidence:
         """A derived-but-unproven candidate. Neutral on purpose: it is a lead worth

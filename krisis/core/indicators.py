@@ -100,13 +100,19 @@ def domain_from_url(url: str) -> str | None:
 # occam: static suffix list, swap for the `tldextract` package if suffix accuracy
 # starts producing real misclassifications — the failure mode is only that two
 # hosts under an unusual multi-part ccTLD look like different organizations.
+#
+# 'bank.in' is here for the same structural reason as 'co.in': RBI reserves it
+# as a restricted second-level namespace for regulated banks and directs banks
+# to migrate their domains to it (see is_bank_in_namespace below), so
+# 'hdfc.bank.in' and 'sbi.bank.in' must register as two organizations, not
+# collapse to the shared suffix 'bank.in'.
 _MULTI_LABEL_SUFFIXES = frozenset(
     {
         "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "net.uk", "sch.uk",
         "com.au", "net.au", "org.au", "edu.au", "gov.au",
         "co.nz", "net.nz", "org.nz", "govt.nz",
         "co.jp", "or.jp", "ne.jp", "ac.jp", "go.jp",
-        "co.in", "net.in", "org.in", "gov.in", "ac.in", "edu.in",
+        "co.in", "net.in", "org.in", "gov.in", "ac.in", "edu.in", "bank.in",
         "com.br", "net.br", "org.br", "gov.br",
         "co.za", "org.za", "gov.za",
         "com.cn", "net.cn", "org.cn", "gov.cn",
@@ -143,3 +149,16 @@ def same_organization(host_a: str, host_b: str) -> bool:
     """True if two hostnames sit under the same registrable domain."""
     a, b = registrable_domain(host_a), registrable_domain(host_b)
     return bool(a) and a == b
+
+
+def is_bank_in_namespace(host: str) -> bool:
+    """True only for an exact registrable domain under India's restricted
+    .bank.in namespace ('hdfc.bank.in', 'netbanking.hdfc.bank.in').
+
+    False for a label/substring trick that merely contains 'bank.in'
+    ('hdfcbank.in', 'fake-bank.in'), for the namespace used as a subdomain of
+    an unrelated domain ('hdfc.bank.in.attacker.com'), and for the bare
+    namespace root ('bank.in') which names no institution. Namespace
+    membership is not institution verification — see identity_collector.
+    """
+    return registrable_domain(host).endswith(".bank.in")

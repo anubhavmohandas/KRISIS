@@ -335,6 +335,64 @@ class TestRiskTreatmentOfIdentity(unittest.TestCase):
         self.assertLess(with_age.score, alone.score)
 
 
+class TestBankNamespaceSignal(unittest.TestCase):
+    """India's RBI restricts the .bank.in namespace to regulated banks
+    specifically to cut phishing (indicators.is_bank_in_namespace). Fixture
+    institution is invented ('glorpbank'), same reasoning as REAL/FAKE above:
+    nothing about a real bank may be hardcoded anywhere in this mechanism.
+    """
+
+    BANK = "glorpbank.bank.in"
+
+    def collector(self):
+        return IdentityCollector(probe=None, references=lambda: set())
+
+    def test_a_domain_in_the_namespace_earns_contradicting_identity_evidence(self):
+        """Delete IdentityCollector._bank_namespace_evidence and a legitimate bank
+        domain gets no credit at all for sitting in the restricted namespace."""
+        entity = Entity(value=self.BANK, type=EntityType.DOMAIN)
+        evidence = self.collector().collect(entity).evidence
+        finding = next(e for e in evidence if e.signal == "verified_bank_namespace")
+        self.assertEqual(finding.polarity, Polarity.CONTRADICTS_THREAT)
+        self.assertEqual(finding.evidence_type, "identity")
+
+    def test_the_signal_does_not_fire_on_a_lookalike_of_the_namespace(self):
+        for host in ("glorpbankonline.in", "glorpbank-secure.in", "glorpbank.bank.in.attacker.com"):
+            evidence = self.collector().collect(Entity(value=host, type=EntityType.DOMAIN)).evidence
+            self.assertFalse(
+                [e for e in evidence if e.signal == "verified_bank_namespace"], host,
+            )
+
+    def test_namespace_credit_reduces_but_does_not_erase_an_impersonation_finding(self):
+        """Section 10 of the design doc: .bank.in must materially help (section 9)
+        without becoming an unquestionable-safe override. A genuine identity +
+        credential-phishing finding on the same case must still out-argue it."""
+        lookalike = Evidence(
+            source="identity", entity_id="e1", signal="lookalike_domain", value="glorpbank.com",
+            evidence_type="identity", polarity=Polarity.SUPPORTS_THREAT, confidence=0.8,
+            independence=Independence.INDEPENDENT,
+        )
+        cred_form = Evidence(
+            source="page", entity_id="e1", signal="credential_form", value={},
+            evidence_type="behavior", polarity=Polarity.SUPPORTS_THREAT, confidence=0.5,
+            independence=Independence.INDEPENDENT,
+        )
+        namespace_evidence = self.collector().collect(Entity(value=self.BANK, type=EntityType.DOMAIN)).evidence
+
+        engine = RiskEngine()
+        without_namespace = engine.score(
+            CorrelationResult(supporting=[lookalike, cred_form], evidence_diversity=0.6)
+        )
+        with_namespace = engine.score(
+            CorrelationResult(
+                supporting=[lookalike, cred_form], contradicting=namespace_evidence,
+                evidence_diversity=0.6,
+            )
+        )
+        self.assertLess(with_namespace.score, without_namespace.score)
+        self.assertNotEqual(with_namespace.category, RiskCategory.LOW)
+
+
 # -- end-to-end: identity becomes a graph edge --------------------------------
 
 class ProbeDNS(EvidenceCollector):
