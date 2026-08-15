@@ -12,14 +12,30 @@ auditable later via investigation replay.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
+from .indicators import same_organization
 from .models import Entity, EntityType, Evidence, Pivot
 
 # Entity types below this per-entity fan-out are considered "noisy" and get a
 # priority penalty — e.g. a nameserver or ASN shared with thousands of domains
 # is a weak pivot even though it is technically a relationship.
 NOISY_FANOUT_THRESHOLD = 25
+
+# Relations that routinely point at commodity third-party services rather than at
+# infrastructure the target actually controls. "example.com uses Microsoft for mail"
+# is a fact about Microsoft's market share, not a lead about example.com — and
+# following it drags thousands of unrelated organizations into the same cluster.
+COMMODITY_RELATIONS = frozenset({"uses_mailserver", "uses_nameserver", "cname_to"})
+
+# How hard a third-party commodity pivot is down-weighted. Not zero: shared hosting
+# genuinely matters when the *seed itself* is suspicious, so the pivot survives as a
+# low-priority candidate rather than being silently dropped.
+THIRD_PARTY_PENALTY = 0.25
+
+# An indicator already seen across this many distinct prior investigations is
+# commodity infrastructure by observation, whatever its name suggests.
+SHARED_ACROSS_CASES_THRESHOLD = 3
 
 
 @dataclass
@@ -63,9 +79,17 @@ PIVOT_RULES: dict[str, tuple[EntityType, str, float, str]] = {
 
 
 class PivotEngine:
-    def __init__(self, budget: Optional[InvestigationBudget] = None) -> None:
+    def __init__(
+        self,
+        budget: Optional[InvestigationBudget] = None,
+        case_count_lookup: Optional[Callable[[str, str], int]] = None,
+    ) -> None:
+        """case_count_lookup(entity_type, value) -> how many distinct prior cases saw
+        this indicator. Injected rather than imported so the pivot engine stays
+        independent of storage; without it, only the structural rules apply."""
         self.budget = budget or InvestigationBudget()
         self._pivots_per_entity: dict[str, int] = {}
+        self.case_count_lookup = case_count_lookup
 
     def generate(self, entity: Entity, evidence_items: list[Evidence]) -> list[Pivot]:
         """Given newly collected evidence about `entity`, produce scored candidate pivots."""
@@ -79,19 +103,18 @@ class PivotEngine:
             for v in values:
                 if not v:
                     continue
-                priority = self._score(entity, ev, base_priority)
-                candidates.append(
-                    Pivot(
-                        entity_value=str(v),
-                        entity_type=target_type,
-                        reason=reason,
-                        priority=priority,
-                        source_entity_id=entity.id,
-                        relation_type=relation_type,
-                        source_evidence_id=ev.id,
-                        depth=entity.depth + 1,
-                    )
+                pivot = Pivot(
+                    entity_value=str(v),
+                    entity_type=target_type,
+                    reason=reason,
+                    priority=self._score(entity, ev, base_priority),
+                    source_entity_id=entity.id,
+                    relation_type=relation_type,
+                    source_evidence_id=ev.id,
+                    depth=entity.depth + 1,
                 )
+                self._apply_commodity_penalty(entity, pivot)
+                candidates.append(pivot)
         candidates.sort(key=lambda p: p.priority, reverse=True)
         return candidates
 
@@ -103,6 +126,41 @@ class PivotEngine:
         if evidence.polarity.value == "supports_threat":
             score += 0.1
         return max(0.0, min(1.0, score))
+
+    def _apply_commodity_penalty(self, source: Entity, pivot: Pivot) -> None:
+        """Down-weight pivots into infrastructure the target merely rents, and flag them
+        so nothing downstream mistakes them for a distinguishing relationship.
+
+        Two independent tests, because each covers the other's blind spot:
+          - structural: the target sits under a different registrable domain, which
+            works on an empty database where no history exists yet
+          - historical: many unrelated prior cases already touched this indicator,
+            which catches commodity infrastructure the naming does not reveal
+        """
+        reasons: list[str] = []
+
+        if pivot.relation_type in COMMODITY_RELATIONS and not same_organization(
+            source.value, pivot.entity_value
+        ):
+            reasons.append(
+                f"third-party {pivot.relation_type.replace('_', ' ')} outside "
+                f"{source.value}'s own domain"
+            )
+
+        if self.case_count_lookup:
+            try:
+                seen_in = self.case_count_lookup(pivot.entity_type.value, pivot.entity_value)
+            except Exception:
+                seen_in = 0
+            if seen_in >= SHARED_ACROSS_CASES_THRESHOLD:
+                reasons.append(f"already seen in {seen_in} unrelated prior investigations")
+
+        if not reasons:
+            return
+
+        pivot.priority *= THIRD_PARTY_PENALTY
+        pivot.shared_infrastructure = True
+        pivot.reason = f"{pivot.reason} — low investigative value: {'; '.join(reasons)}"
 
     def accept_or_reject(self, pivot: Pivot, current_depth_count: int) -> Pivot:
         """Apply budget + noise rules. Mutates and returns the pivot with a final status."""
@@ -126,14 +184,30 @@ class PivotEngine:
             )
             return pivot
 
+        # Rejection reasons carry the *investigative* justification, not just the rule
+        # that fired — "below threshold" alone is unauditable in a replay.
+        commodity_note = (
+            pivot.reason.split("— low investigative value: ", 1)[1]
+            if pivot.shared_infrastructure and "— low investigative value: " in pivot.reason
+            else None
+        )
+
         if pivot.entity_type in (EntityType.NAMESERVER, EntityType.ASN) and pivot.priority < 0.35:
             pivot.status = "rejected"
-            pivot.rejection_reason = "low-value shared infrastructure (likely noisy fan-out)"
+            pivot.rejection_reason = (
+                f"shared infrastructure, not a distinguishing lead: {commodity_note}"
+                if commodity_note
+                else "low-value shared infrastructure (likely noisy fan-out)"
+            )
             return pivot
 
         if pivot.priority < 0.2:
             pivot.status = "rejected"
-            pivot.rejection_reason = "priority below investigative threshold"
+            pivot.rejection_reason = (
+                f"priority {pivot.priority:.2f} below threshold — {commodity_note}"
+                if commodity_note
+                else f"priority {pivot.priority:.2f} below investigative threshold"
+            )
             return pivot
 
         pivot.status = "accepted"

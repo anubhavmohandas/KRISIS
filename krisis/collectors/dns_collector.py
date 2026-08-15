@@ -67,7 +67,7 @@ class DNSCollector(EvidenceCollector):
             except Exception:
                 continue
 
-            values = [str(r) for r in answers]
+            values = self._parse_records(rtype, answers)
             if not values:
                 continue
             any_record_found = True
@@ -89,3 +89,30 @@ class DNSCollector(EvidenceCollector):
             return CollectorResult(evidence=[], available=False, note="no DNS response / provider unreachable")
 
         return CollectorResult(evidence=evidence, available=True, note="ok" if any_record_found else "no records")
+
+    def _parse_records(self, rtype: str, answers) -> list[str]:
+        """Parse DNS records into normalized values, handling special cases.
+
+        - MX: Extract only the mail server hostname (exchange), filter out "." (no mail service)
+        - NS/CNAME: Use target attribute if available
+        - A/AAAA/TXT/SOA: Convert to string
+        """
+        values = []
+        for r in answers:
+            if rtype == "MX":
+                # MX records have preference and exchange; we only care about the exchange (mail server)
+                exchange = str(r.exchange).rstrip(".")  # Remove trailing dot for consistency
+                # Filter out the special "." value which means "no mail service"
+                if exchange and exchange != ".":
+                    values.append(exchange)
+            elif rtype in ("NS", "CNAME"):
+                # These have a target attribute that's the hostname
+                if hasattr(r, "target"):
+                    target = str(r.target).rstrip(".")
+                    values.append(target)
+                else:
+                    values.append(str(r))
+            else:
+                # A, AAAA, TXT, SOA — just use string representation
+                values.append(str(r))
+        return values

@@ -28,6 +28,18 @@ _ACTIONS = {
         "Do not interact with this artifact. Preserve evidence (do not delete the message/file), "
         "and report it through your organization's security channel or the relevant platform."
     ),
+    RiskCategory.INSUFFICIENT_EVIDENCE: (
+        "INSUFFICIENT EVIDENCE. KRISIS could not gather enough evidence to judge this "
+        "artifact — this is NOT a clean result, and it must not be read as one. "
+        "Treat the artifact as unverified: do not enter credentials or personal "
+        "information, and verify through an independently known-good channel."
+    ),
+    RiskCategory.CONFLICTING_EVIDENCE: (
+        "CONFLICTING EVIDENCE. Sources disagree at comparable strength, so no single "
+        "verdict is supportable from what was collected. Review the supporting and "
+        "contradicting evidence below before acting, and avoid submitting sensitive "
+        "information until the conflict is resolved."
+    ),
     RiskCategory.UNKNOWN: (
         "Insufficient evidence was collected to reach a confident conclusion. "
         "Treat the artifact with caution and avoid providing sensitive information until "
@@ -35,11 +47,29 @@ _ACTIONS = {
     ),
 }
 
+_INDECISIVE = (
+    RiskCategory.INSUFFICIENT_EVIDENCE,
+    RiskCategory.CONFLICTING_EVIDENCE,
+    RiskCategory.UNKNOWN,
+)
+
 
 def recommend_action(risk: RiskAssessment) -> str:
+    base = _ACTIONS.get(risk.category, _ACTIONS[RiskCategory.UNKNOWN])
+
+    # A reassuring verdict reached on weak evidence is the one failure mode with a
+    # real-world cost, so low confidence downgrades the advice rather than the score.
     if risk.confidence < 0.25 and risk.category in (RiskCategory.LOW, RiskCategory.MEDIUM):
-        return (
-            f"{_ACTIONS[RiskCategory.UNKNOWN]} "
+        base = (
+            f"{_ACTIONS[RiskCategory.INSUFFICIENT_EVIDENCE]} "
             f"(Confidence in this specific assessment was low: {risk.confidence:.0%}.)"
         )
-    return _ACTIONS.get(risk.category, _ACTIONS[RiskCategory.UNKNOWN])
+
+    reason = risk.uncertainty.get("reason") if risk.uncertainty else None
+    if reason and risk.category in _INDECISIVE:
+        base = f"{base} Reason: {reason}."
+
+    unavailable = risk.uncertainty.get("unavailable_sources") if risk.uncertainty else None
+    if unavailable:
+        base = f"{base} Sources that could not be checked: {', '.join(unavailable)}."
+    return base

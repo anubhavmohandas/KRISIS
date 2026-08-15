@@ -32,19 +32,31 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 pip install -e .
 
-# optional — enables VirusTotal evidence and the LLM explanation layer
-cp api_keys.example.txt api_keys.txt   # then fill in VIRUSTOTAL_API_KEY
-export ANTHROPIC_API_KEY=...           # optional, falls back to a deterministic
-                                        # template explanation if unset
-
 krisis investigate suspicious-domain.example --verbose
 ```
 
-Every collector is optional and independent: KRISIS runs (and produces a
-score, with reduced confidence) with zero API keys and zero of the optional
-`dnspython` / `python-whois` / `ipwhois` / `pyOpenSSL` packages installed. It
-just tells you plainly what it couldn't check, rather than treating an
-unavailable provider as "clean" (see `provider_failures` on every case).
+On first run KRISIS asks about optional provider keys, one at a time — what
+each one buys, what you lose without it, and where to get it. Paste a key and
+it is verified against the provider and saved to `~/.krisis/api_keys.txt`
+(`0600`); press Enter to skip and it records the decision and never asks
+again. Manage it any time:
+
+```bash
+krisis setup                              # walk through every unconfigured key
+krisis setup --provider virustotal        # just one
+krisis setup --show                       # what's configured, what's skipped
+krisis investigate xyz.com --no-prompt    # never ask (scripts/CI)
+```
+
+Environment variables (`VIRUSTOTAL_API_KEY`, `ANTHROPIC_API_KEY`) always take
+priority over the stored file.
+
+Every collector is optional and independent: KRISIS runs with zero API keys and
+zero of the optional `dnspython` / `python-whois` / `ipwhois` / `pyOpenSSL`
+packages installed. What it will *not* do is convert a source it couldn't reach
+into a clean verdict — a skipped source is reported as skipped in the output,
+and a result that rests on unchecked reputation is reported as
+`INSUFFICIENT_EVIDENCE` rather than `LOW`.
 
 ## CLI
 
@@ -126,6 +138,47 @@ resemblance to previously confirmed infrastructure. The final raw score is
 scaled by an evidence-diversity factor so a single-source finding cannot reach
 HIGH/CRITICAL. Weights are documented in-line in `TYPE_WEIGHTS` with the
 reasoning for each.
+
+**"Not checked" is never "clean".** The engine takes a `Coverage` record of what
+actually answered *about the seed artifact*, and refuses to assert a benign
+verdict it didn't earn:
+
+| Situation | Category |
+|---|---|
+| No evidence collected at all | `INSUFFICIENT_EVIDENCE` |
+| Low score, but no reputation source was reachable | `INSUFFICIENT_EVIDENCE` |
+| Supporting and contradicting evidence of comparable weight | `CONFLICTING_EVIDENCE` |
+| Low score with reputation actually checked | `LOW` |
+
+Confidence is scaled by coverage separately from the score, so risk, confidence
+and pattern similarity can disagree — which is the point: *"resembles known-bad
+infrastructure, but live evidence is incomplete"* is a real and reportable state.
+
+### Commodity-infrastructure suppression
+
+A domain "using Microsoft for mail" is a fact about Microsoft's market share,
+not a lead about the domain. Left unchecked it is actively harmful: the vendor's
+IPs land in indicator memory, and every later investigation touching that vendor
+matches them — merging unrelated organizations into one fake cluster.
+
+KRISIS flags such entities via two independent tests (`pivot_engine.py`):
+structural (the target sits under a different registrable domain, reached via
+MX/NS/CNAME — works on an empty database) and historical (the indicator already
+appears across ≥3 unrelated prior artifacts — catches vendors the naming doesn't
+reveal). Flagged entities are deprioritised as pivots, propagate the flag to
+anything discovered through them, and are excluded from indicator memory and
+pattern matching. Genuine shared hosting still matches normally.
+
+### Pattern lifecycle
+
+Patterns move `observed → candidate → repeated → validated → trusted`, with
+`deprecated` for those that keep producing false positives. **Repetition alone
+never advances past `repeated`** — only a human-confirmed outcome via
+`krisis outcome` reaches `validated`. An `inconclusive` outcome deliberately
+changes nothing. A historical match's weight in scoring is gated on the prior
+case's outcome (`OUTCOME_TRUST` in `risk.py`): resembling a *confirmed benign*
+case adds zero risk, and resembling an unvalidated one counts for very little.
+Re-investigating the same artifact cannot match its own earlier run.
 
 ### Historical pattern matching (`krisis/memory/pattern_memory.py`)
 

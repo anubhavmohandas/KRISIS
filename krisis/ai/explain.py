@@ -24,7 +24,7 @@ from typing import Optional
 
 from ..core.correlation import CorrelationResult
 from ..core.graph import EntityGraph
-from ..core.models import Case
+from ..core.models import Case, RiskCategory
 
 SYSTEM_PROMPT = (
     "You are the explanation layer of KRISIS, a threat-investigation engine. "
@@ -36,6 +36,10 @@ SYSTEM_PROMPT = (
     "- Use ONLY the evidence provided. Never invent, assume, or infer evidence not given.\n"
     "- Never claim a source was consulted if it is not present in the findings.\n"
     "- If evidence is thin or a provider was unavailable, say so plainly.\n"
+    "- If the risk category is INSUFFICIENT_EVIDENCE or CONFLICTING_EVIDENCE, do NOT "
+    "present the artifact as safe. State clearly that KRISIS could not reach a verdict, "
+    "and why, using the 'uncertainty' field. A low score in these states means "
+    "'not established', never 'clean'.\n"
     "- Explicitly separate current reputation from historical pattern similarity if both exist.\n"
     "- Mention both supporting and contradicting evidence, even if one side is empty.\n"
     "- End with why the confidence level is what it is.\n"
@@ -62,9 +66,21 @@ class Explainer:
             return "Investigation did not complete far enough to reach a risk assessment."
 
         lines: list[str] = []
-        lines.append(
-            f"{risk.category.value} RISK ({risk.score}/100, confidence {risk.confidence:.0%}) for '{case.seed}'."
-        )
+        if risk.category in (RiskCategory.INSUFFICIENT_EVIDENCE, RiskCategory.CONFLICTING_EVIDENCE,
+                             RiskCategory.UNKNOWN):
+            headline = risk.category.value.replace("_", " ").lower()
+            lines.append(
+                f"KRISIS reached no verdict for '{case.seed}' — {headline} "
+                f"(score so far {risk.score}/100, confidence {risk.confidence:.0%}). "
+                f"This is not a clean result."
+            )
+            if risk.uncertainty.get("reason"):
+                lines.append(f"{risk.uncertainty['reason'].capitalize()}.")
+        else:
+            lines.append(
+                f"{risk.category.value} RISK ({risk.score}/100, confidence {risk.confidence:.0%}) "
+                f"for '{case.seed}'."
+            )
 
         if correlation.supporting:
             top = ", ".join(f"{e.signal} ({e.source})" for e in correlation.supporting[:4])
@@ -105,6 +121,7 @@ class Explainer:
         findings = {
             "seed": case.seed,
             "risk": case.risk.to_dict() if case.risk else None,
+            "uncertainty": case.risk.uncertainty if case.risk else {},
             "supporting_evidence": [e.to_dict() for e in correlation.supporting],
             "contradicting_evidence": [e.to_dict() for e in correlation.contradicting],
             "pattern_matches": case.pattern_matches,

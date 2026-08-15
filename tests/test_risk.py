@@ -82,19 +82,26 @@ class TestRiskEngine(unittest.TestCase):
         triple_score = engine.score(three_same_type).score
         self.assertLess(triple_score, single_score * 3)
 
-    def test_no_evidence_yields_zero_confidence(self):
+    def test_no_evidence_is_reported_as_insufficient_not_low(self):
+        """An empty investigation is not a clean one. Returning LOW here would tell a
+        user an artifact looks safe when KRISIS never actually managed to look at it."""
         engine = RiskEngine()
         result = engine.score(CorrelationResult())
         self.assertEqual(result.confidence, 0.0)
         self.assertEqual(result.score, 0)
-        self.assertEqual(result.category.value, "LOW")
+        self.assertEqual(result.category.value, "INSUFFICIENT_EVIDENCE")
+        self.assertIn("reason", result.uncertainty)
 
     def test_historical_similarity_contributes_even_with_clean_reputation(self):
         engine = RiskEngine()
         clean_but_similar = CorrelationResult(supporting=[], contradicting=[], evidence_diversity=0.5)
         result = engine.score(
             clean_but_similar,
-            historical_similarity={"similarity": 0.9, "pattern_name": "prior phishing cluster"},
+            historical_similarity={
+                "similarity": 0.9,
+                "pattern_name": "prior phishing cluster",
+                "prior_outcome": "confirmed_malicious",
+            },
         )
         self.assertGreater(result.score, 0)
         self.assertTrue(any("historical" in c for c in result.top_contributors))

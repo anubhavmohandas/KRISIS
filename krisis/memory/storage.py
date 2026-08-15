@@ -57,12 +57,26 @@ CREATE TABLE IF NOT EXISTS patterns (
     name TEXT NOT NULL,
     description TEXT,
     signature_json TEXT,
+    observed_count INTEGER DEFAULT 0,
     confirmed_count INTEGER DEFAULT 0,
     false_positive_count INTEGER DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- Which cases exhibited which pattern signature. When a case outcome is later
+-- validated, this is the link the learning loop walks to credit or discredit
+-- the patterns that case actually displayed.
+CREATE TABLE IF NOT EXISTS case_patterns (
+    case_id TEXT NOT NULL,
+    pattern_id TEXT NOT NULL,
+    PRIMARY KEY (case_id, pattern_id)
+);
 """
+
+# Columns added after the first release. SQLite has no "ADD COLUMN IF NOT EXISTS",
+# so missing ones are added on open — existing local databases keep working.
+_MIGRATIONS = [("patterns", "observed_count", "INTEGER DEFAULT 0")]
 
 
 class Storage:
@@ -86,6 +100,10 @@ class Storage:
     def _init_schema(self) -> None:
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            for table, column, decl in _MIGRATIONS:
+                existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     # -- cases ------------------------------------------------------------
 
@@ -126,8 +144,17 @@ class Storage:
     def set_outcome(self, case_id: str, outcome: str) -> None:
         with self._connect() as conn:
             conn.execute("UPDATE cases SET outcome = ? WHERE id = ?", (outcome, case_id))
-        # keep indicators in sync so future matching reflects the confirmed outcome
-        with self._connect() as conn:
+            # The full case JSON is the record of truth an analyst reads back later;
+            # leaving its outcome stale while the summary column says otherwise would
+            # make the stored case disagree with itself.
+            row = conn.execute("SELECT data_json FROM cases WHERE id = ?", (case_id,)).fetchone()
+            if row:
+                data = json.loads(row["data_json"])
+                data["outcome"] = outcome
+                conn.execute(
+                    "UPDATE cases SET data_json = ? WHERE id = ?", (json.dumps(data), case_id)
+                )
+            # keep indicators in sync so future matching reflects the confirmed outcome
             conn.execute("UPDATE indicators SET outcome = ? WHERE case_id = ?", (outcome, case_id))
 
     # -- indicators ---------------------------------------------------------
@@ -143,31 +170,82 @@ class Storage:
                 (case_id, entity_type, value.lower(), seed, outcome, risk_category, created_at),
             )
 
-    def find_indicator_matches(self, entity_type: str, value: str) -> list[dict[str, Any]]:
+    def count_cases_for_indicator(self, entity_type: str, value: str) -> int:
+        """How many distinct seed artifacts have ever produced this indicator.
+
+        Counting distinct *seeds* rather than cases keeps repeated investigations of
+        one artifact from inflating the number and making its own infrastructure look
+        like a commodity service.
+        """
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT DISTINCT case_id, seed, outcome, risk_category FROM indicators "
-                "WHERE entity_type = ? AND value = ?",
+            row = conn.execute(
+                "SELECT COUNT(DISTINCT seed) AS n FROM indicators WHERE entity_type = ? AND value = ?",
                 (entity_type, value.lower()),
-            ).fetchall()
+            ).fetchone()
+        return row["n"] if row else 0
+
+    def find_indicator_matches(
+        self, entity_type: str, value: str, exclude_seed: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        """Prior cases that observed this exact indicator.
+
+        exclude_seed drops cases seeded on the same artifact: re-investigating one
+        domain would otherwise "match" its own earlier run and be reported as an
+        infrastructure resemblance to a different case.
+        """
+        sql = (
+            "SELECT DISTINCT case_id, seed, outcome, risk_category FROM indicators "
+            "WHERE entity_type = ? AND value = ?"
+        )
+        params: list[Any] = [entity_type, value.lower()]
+        if exclude_seed:
+            sql += " AND seed <> ?"
+            params.append(exclude_seed)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
     # -- patterns -------------------------------------------------------------
 
-    def upsert_pattern(self, pattern_id: str, name: str, description: str, signature: dict, now: str) -> None:
+    def observe_pattern(self, pattern_id: str, name: str, description: str, signature: dict, now: str) -> None:
+        """Record that this pattern signature was seen once more. Observation is not
+        validation — it only advances the lifecycle as far as 'repeated'."""
         with self._connect() as conn:
             existing = conn.execute("SELECT id FROM patterns WHERE id = ?", (pattern_id,)).fetchone()
             if existing:
                 conn.execute(
-                    "UPDATE patterns SET name=?, description=?, signature_json=?, updated_at=? WHERE id=?",
+                    "UPDATE patterns SET name=?, description=?, signature_json=?, "
+                    "observed_count = observed_count + 1, updated_at=? WHERE id=?",
                     (name, description, json.dumps(signature), now, pattern_id),
                 )
             else:
                 conn.execute(
-                    """INSERT INTO patterns (id, name, description, signature_json, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    """INSERT INTO patterns
+                       (id, name, description, signature_json, observed_count, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, 1, ?, ?)""",
                     (pattern_id, name, description, json.dumps(signature), now, now),
                 )
+
+    def get_pattern(self, pattern_id: str) -> Optional[dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM patterns WHERE id = ?", (pattern_id,)).fetchone()
+        return dict(row) if row else None
+
+    def link_case_pattern(self, case_id: str, pattern_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO case_patterns (case_id, pattern_id) VALUES (?, ?)",
+                (case_id, pattern_id),
+            )
+
+    def patterns_for_case(self, case_id: str) -> list[str]:
+        """Pattern ids whose signature this case exhibited — the link the learning
+        loop follows when an outcome arrives."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT pattern_id FROM case_patterns WHERE case_id = ?", (case_id,)
+            ).fetchall()
+        return [r["pattern_id"] for r in rows]
 
     def strengthen_pattern(self, pattern_id: str, confirmed: bool, now: str) -> None:
         column = "confirmed_count" if confirmed else "false_positive_count"

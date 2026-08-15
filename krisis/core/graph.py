@@ -33,6 +33,11 @@ class EntityGraph:
             existing = self._entities[existing_id]
             # keep the shallower depth if we rediscover the same entity via a shorter path
             existing.depth = min(existing.depth, entity.depth)
+            # If the same entity is also reachable by a route that is *not* commodity
+            # infrastructure, that genuine relationship wins — an IP first seen behind a
+            # shared mail provider still matters if the target also resolves to it directly.
+            if not entity.shared_infrastructure:
+                existing.shared_infrastructure = False
             return existing
         self._entities[entity.id] = entity
         self._by_key[key] = entity.id

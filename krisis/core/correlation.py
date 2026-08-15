@@ -44,7 +44,9 @@ class CorrelationEngine:
         """pattern_memory: object with .find_similar(graph, evidence) -> list[dict], optional."""
         self.pattern_memory = pattern_memory
 
-    def correlate(self, graph: EntityGraph, evidence: list[Evidence]) -> CorrelationResult:
+    def correlate(
+        self, graph: EntityGraph, evidence: list[Evidence], exclude_seed: Optional[str] = None
+    ) -> CorrelationResult:
         result = CorrelationResult()
 
         for ev in evidence:
@@ -60,7 +62,9 @@ class CorrelationEngine:
 
         if self.pattern_memory is not None:
             try:
-                result.pattern_matches = self.pattern_memory.find_similar(graph, evidence)
+                result.pattern_matches = self.pattern_memory.find_similar(
+                    graph, evidence, exclude_seed=exclude_seed
+                )
             except Exception:
                 # Pattern memory is an enhancement, never a hard dependency.
                 result.pattern_matches = []

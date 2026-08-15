@@ -61,7 +61,59 @@ class RiskCategory(str, Enum):
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
     CRITICAL = "CRITICAL"
+    # Not-a-threat-level states. "Not checked" is not "clean": when KRISIS could
+    # not actually examine the artifact, or its sources disagree, it must say so
+    # rather than fall through to LOW (see UNCERTAINTY STATES in the design doc).
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+    CONFLICTING_EVIDENCE = "CONFLICTING_EVIDENCE"
     UNKNOWN = "UNKNOWN"
+
+
+# Prior-case outcomes. A historical resemblance only means something once the
+# prior case was actually validated — see PATTERN LIFECYCLE / POISONING RESISTANCE.
+class Outcome(str, Enum):
+    CONFIRMED_MALICIOUS = "confirmed_malicious"
+    CONFIRMED_BENIGN = "confirmed_benign"
+    FALSE_POSITIVE = "false_positive"
+    FALSE_NEGATIVE = "false_negative"
+    INCONCLUSIVE = "inconclusive"
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class Coverage:
+    """What KRISIS actually managed to check about the seed artifact.
+
+    Risk and confidence are both meaningless without this: a clean result from
+    two sources that answered, while three were down, is not the same finding as
+    a clean result from five that answered.
+    """
+
+    attempted: set[str] = field(default_factory=set)        # collector names asked about the seed
+    available: set[str] = field(default_factory=set)        # collector names that returned data
+    evidence_types: set[str] = field(default_factory=set)   # evidence_type values actually obtained
+
+    @property
+    def failed(self) -> set[str]:
+        return self.attempted - self.available
+
+    @property
+    def ratio(self) -> float:
+        return len(self.available) / len(self.attempted) if self.attempted else 0.0
+
+    def has_reputation_source(self) -> bool:
+        """True if at least one source actually offered a threat-reputation opinion.
+        Without one, KRISIS has no basis to assert an artifact is low risk."""
+        return "reputation" in self.evidence_types
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "sources_attempted": sorted(self.attempted),
+            "sources_available": sorted(self.available),
+            "sources_unavailable": sorted(self.failed),
+            "coverage_ratio": round(self.ratio, 3),
+            "reputation_checked": self.has_reputation_source(),
+        }
 
 
 @dataclass
@@ -74,6 +126,12 @@ class Entity:
     first_seen: str = field(default_factory=_now)
     depth: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
+    # True for commodity infrastructure the target merely rents (a shared mail
+    # provider, a public nameserver and anything reached through one). Such an
+    # entity is a fact about a vendor's market share, not a distinguishing trait of
+    # this artifact, so it is excluded from indicator memory and pattern matching —
+    # otherwise every organization using the same mail vendor looks related.
+    shared_infrastructure: bool = False
 
     def key(self) -> str:
         """Stable dedup key: same (type, value) is always the same entity."""
@@ -86,6 +144,7 @@ class Entity:
             "type": self.type.value,
             "first_seen": self.first_seen,
             "depth": self.depth,
+            "shared_infrastructure": self.shared_infrastructure,
             "metadata": self.metadata,
         }
 
@@ -169,6 +228,7 @@ class Pivot:
     id: str = field(default_factory=lambda: _new_id("piv"))
     status: str = "pending"          # pending | accepted | rejected | investigated
     rejection_reason: Optional[str] = None
+    shared_infrastructure: bool = False   # target is commodity third-party infrastructure
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -181,6 +241,7 @@ class Pivot:
             "depth": self.depth,
             "status": self.status,
             "rejection_reason": self.rejection_reason,
+            "shared_infrastructure": self.shared_infrastructure,
         }
 
 
@@ -193,6 +254,9 @@ class RiskAssessment:
     contradicting: list[dict[str, Any]]
     top_contributors: list[str]
     historical_similarity: Optional[dict[str, Any]] = None
+    # What KRISIS could not determine. Reported alongside the score, never folded
+    # into it silently (see UNCERTAINTY STATES).
+    uncertainty: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -203,6 +267,7 @@ class RiskAssessment:
             "contradicting_count": len(self.contradicting),
             "top_contributors": self.top_contributors,
             "historical_similarity": self.historical_similarity,
+            "uncertainty": self.uncertainty,
         }
 
 

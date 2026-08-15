@@ -27,7 +27,7 @@ from ..memory.pattern_memory import PatternMemory
 from .correlation import CorrelationEngine
 from .graph import EntityGraph
 from .indicators import classify_seed, domain_from_url, extract_from_text
-from .models import Case, Entity, EntityType, Evidence, Relationship
+from .models import Case, Coverage, Entity, EntityType, Evidence, Relationship
 from .pivot_engine import InvestigationBudget, PivotEngine
 from .recommend import recommend_action
 from .risk import RiskEngine
@@ -57,7 +57,11 @@ class Investigator:
         self.case_memory = case_memory
         self.pattern_memory = pattern_memory
         self.budget = budget or InvestigationBudget()
-        self.pivot_engine = PivotEngine(self.budget)
+        # The pivot engine consults indicator memory to recognise commodity
+        # infrastructure by observation, not just by name.
+        self.pivot_engine = PivotEngine(
+            self.budget, case_count_lookup=self._prior_case_count
+        )
         self.correlation_engine = CorrelationEngine(pattern_memory=pattern_memory)
         self.risk_engine = RiskEngine()
         self.explainer = explainer or Explainer()
@@ -69,13 +73,29 @@ class Investigator:
 
         case = Case(seed=seed_value, seed_type=seed_type)
         graph = EntityGraph()
+        # Coverage is tracked for the seed artifact only. Whether a mail server three
+        # hops away answered says nothing about how well KRISIS examined the thing the
+        # user actually asked about.
+        coverage = Coverage()
 
         seed_entities = self._seed_entities(seed_type, seed_value, trace)
         queue: deque[Entity] = deque()
+        # The graph deduplicates entities, but the queue must too: the same entity is
+        # reachable by several routes (a URL and its extracted domain, or two sources
+        # pivoting to one IP). Queuing it twice re-runs every collector against it,
+        # burning external-call budget and producing identical evidence that would
+        # then be counted as two independent confirmations.
+        queued: set[str] = set()
+
+        def enqueue(entity: Entity) -> None:
+            if entity.id not in queued:
+                queued.add(entity.id)
+                queue.append(entity)
+
         for e in seed_entities:
             added = graph.add_entity(e)
             case.entities[added.id] = added
-            queue.append(added)
+            enqueue(added)
 
         fanout_counter: Counter = Counter()
 
@@ -86,7 +106,7 @@ class Investigator:
                 break
 
             self.budget.register_entity()
-            evidence_items = self._collect_for_entity(entity, case, trace)
+            evidence_items = self._collect_for_entity(entity, case, trace, coverage)
 
             pivots = self.pivot_engine.generate(entity, evidence_items)
             self.pivot_engine.penalize_noisy_fanout(pivots, fanout_counter)
@@ -106,7 +126,15 @@ class Investigator:
                     continue
 
                 fanout_counter[pivot.entity_value] += 1
-                target_entity = Entity(value=pivot.entity_value, type=pivot.entity_type, depth=pivot.depth)
+                target_entity = Entity(
+                    value=pivot.entity_value,
+                    type=pivot.entity_type,
+                    depth=pivot.depth,
+                    # Anything reached *through* commodity infrastructure is itself
+                    # commodity infrastructure: the IPs behind a shared mail provider
+                    # belong to that provider, not to the artifact under investigation.
+                    shared_infrastructure=pivot.shared_infrastructure or entity.shared_infrastructure,
+                )
                 target_entity = graph.add_entity(target_entity)
                 case.entities[target_entity.id] = target_entity
 
@@ -122,17 +150,18 @@ class Investigator:
                 case.relationships[rel.id] = rel
 
                 if target_entity.depth <= self.budget.max_depth:
-                    queue.append(target_entity)
+                    enqueue(target_entity)
 
         # -- correlation, risk, explanation, recommendation --------------------
         all_evidence = list(case.evidence.values())
-        correlation = self.correlation_engine.correlate(graph, all_evidence)
+        correlation = self.correlation_engine.correlate(graph, all_evidence, exclude_seed=case.seed)
         trace.log("correlation", **correlation.to_dict())
 
         historical = correlation.pattern_matches[0] if correlation.pattern_matches else None
         case.pattern_matches = correlation.pattern_matches
 
-        risk = self.risk_engine.score(correlation, historical_similarity=historical)
+        trace.log("coverage", **coverage.to_dict())
+        risk = self.risk_engine.score(correlation, historical_similarity=historical, coverage=coverage)
         case.risk = risk
         trace.log("risk_assessment", **risk.to_dict())
 
@@ -151,6 +180,14 @@ class Investigator:
         return getattr(self, "_graph", None)
 
     # -- internals ----------------------------------------------------------
+
+    def _prior_case_count(self, entity_type: str, value: str) -> int:
+        """How many distinct prior artifacts produced this indicator. Never fatal:
+        pattern memory is an enhancement to pivot scoring, not a dependency."""
+        try:
+            return self.pattern_memory.storage.count_cases_for_indicator(entity_type, value)
+        except Exception:
+            return 0
 
     def _seed_entities(self, seed_type: EntityType, seed_value: str, trace: InvestigationTrace) -> list[Entity]:
         entities = [Entity(value=seed_value, type=seed_type, depth=0)]
@@ -172,8 +209,11 @@ class Investigator:
 
         return entities
 
-    def _collect_for_entity(self, entity: Entity, case: Case, trace: InvestigationTrace) -> list[Evidence]:
+    def _collect_for_entity(
+        self, entity: Entity, case: Case, trace: InvestigationTrace, coverage: Coverage
+    ) -> list[Evidence]:
         collected: list[Evidence] = []
+        is_seed = entity.depth == 0
         for collector in self.collectors:
             if not collector.can_handle(entity):
                 continue
@@ -181,12 +221,18 @@ class Investigator:
                 trace.log("budget_exhausted", limit="max_external_calls", collector=collector.name)
                 break
             self.budget.register_call()
+            if is_seed:
+                coverage.attempted.add(collector.name)
 
             result = collector.collect(entity)
             if not result.available:
                 case.provider_failures.append(f"{collector.name} unavailable for {entity.value}: {result.note}")
                 trace.log("collector_unavailable", collector=collector.name, entity=entity.value, note=result.note)
                 continue
+
+            if is_seed and result.evidence:
+                coverage.available.add(collector.name)
+                coverage.evidence_types.update(ev.evidence_type for ev in result.evidence)
 
             for ev in result.evidence:
                 case.evidence[ev.id] = ev

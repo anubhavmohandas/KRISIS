@@ -93,3 +93,53 @@ def domain_from_url(url: str) -> str | None:
         return parsed.hostname
     except Exception:
         return None
+
+
+# Multi-label public suffixes common enough to matter for registrable-domain
+# comparison. This is a deliberate approximation of the Public Suffix List.
+# occam: static suffix list, swap for the `tldextract` package if suffix accuracy
+# starts producing real misclassifications — the failure mode is only that two
+# hosts under an unusual multi-part ccTLD look like different organizations.
+_MULTI_LABEL_SUFFIXES = frozenset(
+    {
+        "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "net.uk", "sch.uk",
+        "com.au", "net.au", "org.au", "edu.au", "gov.au",
+        "co.nz", "net.nz", "org.nz", "govt.nz",
+        "co.jp", "or.jp", "ne.jp", "ac.jp", "go.jp",
+        "co.in", "net.in", "org.in", "gov.in", "ac.in", "edu.in",
+        "com.br", "net.br", "org.br", "gov.br",
+        "co.za", "org.za", "gov.za",
+        "com.cn", "net.cn", "org.cn", "gov.cn",
+        "com.sg", "com.hk", "com.mx", "com.tr", "com.ar", "com.tw",
+    }
+)
+
+
+def registrable_domain(host: str) -> str:
+    """Approximate eTLD+1 — the part of a hostname that identifies an organization.
+
+    Used to tell "this host belongs to the same organization as the seed" from
+    "this host belongs to a third party", which is what separates a meaningful
+    infrastructure relationship from a shared commodity service.
+    """
+    host = (host or "").strip().strip(".").lower()
+    if not host:
+        return ""
+    try:
+        ipaddress.ip_address(host)
+        return host  # an IP is its own identity; it has no registrable domain
+    except ValueError:
+        pass
+
+    labels = host.split(".")
+    if len(labels) <= 2:
+        return host
+    if ".".join(labels[-2:]) in _MULTI_LABEL_SUFFIXES:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
+
+
+def same_organization(host_a: str, host_b: str) -> bool:
+    """True if two hostnames sit under the same registrable domain."""
+    a, b = registrable_domain(host_a), registrable_domain(host_b)
+    return bool(a) and a == b

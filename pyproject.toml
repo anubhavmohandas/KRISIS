@@ -15,6 +15,9 @@ collectors = [
     "ipwhois>=1.2",
     "pyOpenSSL>=23.0",
 ]
+dev = [
+    "pytest>=8",
+]
 
 [project.scripts]
 krisis = "krisis.cli:main"
