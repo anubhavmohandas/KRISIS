@@ -121,6 +121,25 @@ class TestVerification(unittest.TestCase):
         self.assertIn("could not verify", message)
 
 
+class TestMachineReadableOutputStaysMachineReadable(unittest.TestCase):
+    def test_missing_key_notices_go_to_stderr(self):
+        """`--json` is piped into a parser. A human-readable notice on stdout makes
+        the whole case unparseable, which turns a missing API key into a broken
+        integration rather than a reported gap."""
+        import contextlib
+        import io
+
+        from krisis.cli import _ensure_credentials
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("krisis.credentials.needs_prompt", return_value=True):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                _ensure_credentials(interactive=False)
+
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("not configured", err.getvalue())
+
+
 class TestProviderRegistry(unittest.TestCase):
     def test_ai_layer_is_not_registered_as_an_evidence_source(self):
         """The AI layer explains a finished investigation; it never contributes

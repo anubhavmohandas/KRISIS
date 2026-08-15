@@ -219,8 +219,27 @@ class RiskEngine:
             return RiskCategory.MEDIUM, uncertainty
 
         # Score is in the LOW band. Asserting LOW is a positive claim that the
-        # artifact looks safe, so it requires that something actually checked for
-        # threat reputation. "Nobody looked" must never render as "nothing found".
+        # artifact looks safe, and there are two ways to have no right to make it.
+
+        # A threat-reputation source examined this artifact and flagged it. That is a
+        # direct determination about the artifact itself, not circumstantial evidence,
+        # so however thin the corroboration around it, "looks safe" is not an
+        # available answer. Without this, a single-source detection that fails to
+        # accumulate points is reported as LOW with reassuring advice — while KRISIS
+        # simultaneously lists the detection as its top contributor.
+        flagged = sorted(
+            {ev.source for ev in correlation.supporting if ev.evidence_type == "reputation"}
+        )
+        if flagged:
+            uncertainty["reason"] = (
+                f"a threat-reputation source flagged this artifact ({', '.join(flagged)}) and "
+                f"little else corroborates it — the score stays low for want of corroboration, "
+                f"but a flagged artifact cannot be reported as looking safe"
+            )
+            return RiskCategory.MEDIUM, uncertainty
+
+        # ...and the artifact must actually have been checked for threat reputation.
+        # "Nobody looked" must never render as "nothing found".
         if not coverage.has_reputation_source():
             uncertainty["reason"] = (
                 "no threat-reputation source was available for this artifact, so the "

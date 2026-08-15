@@ -47,7 +47,7 @@ _ACTIONS = {
     ),
 }
 
-_INDECISIVE = (
+INDECISIVE = (
     RiskCategory.INSUFFICIENT_EVIDENCE,
     RiskCategory.CONFLICTING_EVIDENCE,
     RiskCategory.UNKNOWN,
@@ -65,8 +65,10 @@ def recommend_action(risk: RiskAssessment) -> str:
             f"(Confidence in this specific assessment was low: {risk.confidence:.0%}.)"
         )
 
+    # Any category that had to qualify itself states the qualification: a verdict
+    # KRISIS could only reach with a caveat is misleading once the caveat is dropped.
     reason = risk.uncertainty.get("reason") if risk.uncertainty else None
-    if reason and risk.category in _INDECISIVE:
+    if reason:
         base = f"{base} Reason: {reason}."
 
     unavailable = risk.uncertainty.get("unavailable_sources") if risk.uncertainty else None

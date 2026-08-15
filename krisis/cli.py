@@ -26,6 +26,7 @@ from . import credentials
 from .config import default_collectors
 from .core.investigator import Investigator
 from .core.models import Outcome, RiskCategory
+from .core.recommend import INDECISIVE
 from .memory.case_memory import CaseMemory
 from .memory.pattern_memory import PatternMemory
 from .memory.storage import DEFAULT_DB_PATH, Storage
@@ -148,10 +149,13 @@ def _ensure_credentials(interactive: bool) -> None:
         return
     if not interactive or not sys.stdin.isatty():
         for spec in pending:
+            # stderr: this is a note to the operator, and --json runs are piped into
+            # a parser that must receive nothing but the case.
             click.secho(
                 f"[!] {spec.label} key not configured — that evidence source will be skipped. "
                 f"Run `krisis setup` to add it.",
                 fg="yellow",
+                err=True,
             )
         return
 
@@ -380,7 +384,11 @@ def _render_case(case) -> None:
     # to "probably fine" — which is the exact failure this state exists to prevent.
     if risk.uncertainty:
         if risk.uncertainty.get("reason"):
-            click.secho(f"\nWhy this is not a verdict: {risk.uncertainty['reason']}.", fg=color)
+            label = (
+                "Why this is not a verdict"
+                if risk.category in INDECISIVE else "Why this verdict was qualified"
+            )
+            click.secho(f"\n{label}: {risk.uncertainty['reason']}.", fg=color)
         if risk.uncertainty.get("unavailable_sources"):
             click.echo(
                 "Not checked: " + ", ".join(risk.uncertainty["unavailable_sources"])

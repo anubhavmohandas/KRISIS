@@ -153,7 +153,18 @@ verdict it didn't earn:
 | No evidence collected at all | `INSUFFICIENT_EVIDENCE` |
 | Low score, but no reputation source was reachable | `INSUFFICIENT_EVIDENCE` |
 | Supporting and contradicting evidence of comparable weight | `CONFLICTING_EVIDENCE` |
-| Low score with reputation actually checked | `LOW` |
+| Low score, but a reputation source *flagged* the artifact | `MEDIUM` |
+| Low score with reputation actually checked and clean | `LOW` |
+
+The flagged-but-uncorroborated row exists because of a real run: `malware.wicar.org`
+is flagged by VirusTotal, but one reputation hit does not accumulate enough
+weighted points to leave the LOW band, so KRISIS printed
+`malicious_detection (virustotal)` as its top contributor and, two lines later,
+*"LOW risk. No strong evidence of malicious activity was found."* A reputation
+source is a direct determination about the artifact rather than circumstantial
+evidence, so the thin corroboration keeps the **score** low while the **verdict**
+is barred from claiming safety, with the qualification stated in the output and
+carried into the recommended action.
 
 Confidence is scaled by coverage separately from the score, so risk, confidence
 and pattern similarity can disagree — which is the point: *"resembles known-bad
@@ -200,14 +211,46 @@ Re-investigating the same artifact cannot match its own earlier run.
 
 ### Historical pattern matching (`krisis/memory/pattern_memory.py`)
 
-Deliberately **not** a vector database. It is structured indicator-overlap
-matching: every certificate/IP/domain discovered in the current investigation
-is checked against `indicators` recorded from every prior case, weighted by
-how distinguishing that indicator type is (certificate fingerprint match is
-much stronger evidence than an IP match). This is a defensible first-pass
-approximation with an explicitly documented limitation: it cannot detect
-structural similarity (e.g. "same phishing kit template") without a matching
-concrete indicator. See the module docstring for the full reasoning.
+Deliberately **not** a vector database. Two independent dimensions are computed
+and reported separately, then combined:
+
+**Indicator similarity** — *"have I seen these exact values before?"* Every
+certificate/IP/domain discovered in the current investigation is checked against
+`indicators` recorded from prior cases, weighted by how distinguishing that type
+is (a certificate fingerprint is much stronger than an IP). Strong when it fires,
+but blind to an adversary who rotates infrastructure.
+
+**Structural similarity** — *"have I seen this **kind** of investigation before?"*
+Each case also stores a signature of its **shape**, with every concrete value
+stripped out: which signals argued for a threat, which argued against, which
+relationship types were followed, which classes of entity the pivots reached.
+Concrete values are deliberately absent, which is exactly what lets the match
+survive indicator rotation. Facets are weighted by inverse document frequency
+computed over stored cases *at query time*, so structure common to all
+investigations ("it resolves to an IP") contributes almost nothing while a rare
+co-occurrence dominates — the same principle as commodity-infrastructure
+suppression, applied to structure instead of values, and derived from the corpus
+rather than declared in a list. Neutral observations, the seed's own type, and
+anything commodity are excluded from the signature.
+
+```
+--- Historical Pattern Matches ---
+  overall 64%  (indicator 0% / structural 100%)  structural pattern 'valid_tls_present + long_lived_domain'
+      prior_outcome=confirmed_malicious  pattern_stage=validated
+      shared structure:  entity:certificate, entity:ip, rel:resolves_to, ...
+```
+
+That output is a real run: a domain sharing **no** IP, certificate, or nameserver
+with any stored case, recognised through its structure alone.
+
+A shape is far cheaper to coincide with than a certificate fingerprint, so
+structural resemblance is discounted against indicator overlap and scaled by the
+matched pattern's lifecycle stage before the two are combined. A shape seen once
+has almost no influence however perfectly it matches; only repeated, human-
+validated shapes reach full weight, and a `deprecated` one reaches zero. The
+match that feeds the score is the one with the most *impact* — resemblance ×
+outcome trust — not the one that merely resembles hardest, so a strong benign
+match cannot shadow a weaker match to a confirmed-malicious case.
 
 ### AI explanation layer
 
@@ -229,12 +272,26 @@ faked investigator). Run:
 python3 -m unittest discover -s tests -v
 ```
 
-27 tests covering: graph dedup/traversal, pivot budget/depth/noisy-fanout
+118 tests covering: graph dedup/traversal, pivot budget/depth/noisy-fanout
 enforcement, evidence polarity/diversity correlation, risk determinism/
 counter-evidence/diminishing-returns, provider-failure handling (never
-silently treated as "clean"), and — the core differentiator — historical
-pattern matching that flags a domain as suspicious via shared infrastructure
-even when its *current* VirusTotal reputation is clean.
+silently treated as "clean"), provider-payload normalization, and — the core
+differentiator — historical pattern matching that recognises a domain through
+shared infrastructure *or* through case structure alone, even when its current
+VirusTotal reputation is clean.
+
+The count is not the point; **wrong-conclusion coverage** is. Every security
+rule is mutation-tested: deleting the rule from the source must make a specific
+named test fail. Currently verified this way — commodity entities and their
+edges entering a signature, the seed's own type entering a signature, neutral
+evidence entering a signature, self-match exclusion, the structural similarity
+floor, one-facet "shapes", IDF weighting, structural resemblance being treated
+as strong as a shared certificate, a first sighting or unvalidated repetition
+being fully trusted, a discredited shape retaining influence, a benign prior
+outcome raising risk, ranking matches by similarity instead of impact, a
+flagged artifact being called LOW, that rule firing on non-reputation evidence,
+the qualification being dropped from the advice, and the VirusTotal denominator
+regressing to the URL count.
 
 ## Current scope and honest limitations
 
@@ -247,7 +304,8 @@ docs, not the finished system. Implemented for real, end to end:
 - Entity/relationship graph with ASCII visualization (`--show-graph`)
 - Correlation engine (supporting/contradicting/infrastructure-overlap/diversity)
 - Deterministic risk engine with documented weights
-- SQLite case + indicator memory, with structured historical similarity matching
+- SQLite case + indicator memory, with historical matching on both concrete
+  indicators and case structure
 - Learning loop via `krisis outcome` (feeds back into future matching)
 - Template-based explanation (always) + optional LLM explanation
 - Advisory-only recommendation engine
@@ -255,10 +313,16 @@ docs, not the finished system. Implemented for real, end to end:
 Not yet implemented (explicitly out of scope for this pass, see design docs
 §25 and self-critique checklist):
 
-- Higher-level "pattern" abstraction beyond indicator-overlap matching
-  (e.g. detecting "new domain + brand impersonation + credential harvesting"
-  as a named recurring pattern rather than via shared concrete indicators)
-- URL-scanning/redirect-chain collector and brand-impersonation heuristics
+- URL-scanning/redirect-chain collector and brand-impersonation heuristics.
+  Structural signatures are built from whatever signals the collectors emit, so
+  such a collector would enter the signature automatically — but until one
+  exists, the "brand impersonation + credential harvesting" shape cannot be
+  recognised, because nothing observes it
+- Temporal shape (burst timing, ordering of first-seen events) as a signature
+  dimension; the timestamps are stored, but the signature does not read them yet
+- Cases stored before structural matching existed contribute indicators only.
+  There is no backfill: their shape is recorded the next time they are
+  investigated
 - Additional threat-intel provider adapters beyond VirusTotal
 - Desktop app / browser extension (explicitly future phases per the design doc)
 - Evidence-independence classification beyond the collector-declared default
@@ -276,5 +340,5 @@ krisis/
   ai/            explanation layer
   cli.py         click CLI
   config.py      default collector wiring, API key loading
-tests/           27 tests against the real execution path
+tests/           118 tests against the real execution path, mutation-verified
 ```

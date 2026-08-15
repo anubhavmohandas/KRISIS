@@ -97,6 +97,58 @@ class TestNotCheckedIsNotSafe(unittest.TestCase):
         self.assertIn("NOT a clean result", advice)
 
 
+class TestAFlaggedArtifactIsNeverCalledLow(unittest.TestCase):
+    """Found at runtime against a real domain that VirusTotal flags: KRISIS printed
+    'malicious_detection (virustotal)' as its top contributor and, two lines later,
+    'LOW risk. No strong evidence of malicious activity was found.'
+
+    A single reputation hit does not accumulate enough weighted points to leave the
+    LOW band on its own, but a reputation source is a direct determination about the
+    artifact, not circumstantial evidence — so the band may keep the score low while
+    the *verdict* must not claim safety.
+    """
+
+    def setUp(self):
+        self.coverage = Coverage(attempted={"virustotal", "whois"},
+                                 available={"virustotal", "whois"},
+                                 evidence_types={"reputation", "registration"})
+
+    def test_a_lone_reputation_detection_is_not_reported_as_low(self):
+        correlation = CorrelationResult(
+            supporting=[_supporting(conf=0.66)],
+            contradicting=[_contradicting(conf=0.55)],
+            evidence_diversity=1.0,
+        )
+        result = RiskEngine().score(correlation, coverage=self.coverage)
+
+        self.assertLess(result.score, 30, "precondition: the score really is in the LOW band")
+        self.assertEqual(result.category, RiskCategory.MEDIUM)
+        self.assertIn("virustotal", result.uncertainty["reason"])
+        self.assertNotIn("No strong evidence", recommend_action(result))
+
+    def test_the_qualification_reaches_the_recommended_action(self):
+        """A caveat the operator never sees is not a caveat."""
+        result = RiskEngine().score(
+            CorrelationResult(supporting=[_supporting(conf=0.66)], evidence_diversity=1.0),
+            coverage=self.coverage,
+        )
+        self.assertIn("flagged this artifact", recommend_action(result))
+
+    def test_circumstantial_signals_alone_still_read_as_low(self):
+        """Control: the rule must key on a reputation determination, not on any
+        supporting evidence at all, or every weak registration signal becomes MEDIUM."""
+        weak_registration = _supporting(signal="newly_registered_domain", source="whois",
+                                        etype="registration", conf=0.4)
+        result = RiskEngine().score(
+            CorrelationResult(supporting=[weak_registration], neutral=[
+                Evidence(source="virustotal", entity_id="e1", signal="no_detections", value=0,
+                         evidence_type="reputation", confidence=0.3)
+            ], evidence_diversity=1.0),
+            coverage=self.coverage,
+        )
+        self.assertEqual(result.category, RiskCategory.LOW)
+
+
 class TestConflictingEvidence(unittest.TestCase):
     def test_comparable_opposing_evidence_reports_a_conflict(self):
         correlation = CorrelationResult(

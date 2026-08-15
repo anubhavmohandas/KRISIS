@@ -66,8 +66,16 @@ class VirusTotalCollector(EvidenceCollector):
         if detected_urls:
             positives = sum(u.get("positives", 0) for u in detected_urls)
             total_checks = sum(u.get("total", 1) for u in detected_urls) or 1
-            ratio = positives / total_checks
-            evidence.append(self._reputation_evidence(entity, ratio, positives, len(detected_urls)))
+            # The denominator has to be the one the ratio was actually computed from.
+            # Reporting the detections against the *number of URLs* instead produced
+            # provenance like "1528 of 100 engines flagged this", which is not a fact
+            # any reader can check.
+            evidence.append(
+                self._reputation_evidence(
+                    entity, positives / total_checks, positives, total_checks,
+                    subject=f"engine checks across {len(detected_urls)} known URLs on this domain",
+                )
+            )
 
         for sub in data.get("subdomains", [])[:15]:
             evidence.append(
@@ -186,7 +194,13 @@ class VirusTotalCollector(EvidenceCollector):
             return CollectorResult(evidence=[], available=False, note="VirusTotal has no data for this artifact (not checked, not confirmed clean)")
         return None
 
-    def _reputation_evidence(self, entity: Entity, ratio: float, positives: int, total: int) -> Evidence:
+    def _reputation_evidence(
+        self, entity: Entity, ratio: float, positives: int, total: int,
+        subject: str = "VirusTotal engines",
+    ) -> Evidence:
+        """subject: what the denominator counts. A URL or hash report is a straight
+        engine vote; a domain report aggregates engine checks over the URLs VT knows
+        about, and saying so is the difference between provenance and a number."""
         if ratio >= 0.1:
             polarity = Polarity.SUPPORTS_THREAT
             confidence = min(0.95, 0.5 + ratio)
@@ -206,5 +220,5 @@ class VirusTotalCollector(EvidenceCollector):
             polarity=polarity,
             confidence=round(confidence, 2),
             independence=Independence.INDEPENDENT,
-            provenance=f"{positives} of {total} VirusTotal engines flagged this artifact",
+            provenance=f"{positives} of {total} {subject} flagged this artifact",
         )
