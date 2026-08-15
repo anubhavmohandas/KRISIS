@@ -259,3 +259,34 @@ class Storage:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM patterns ORDER BY confirmed_count DESC").fetchall()
         return [dict(r) for r in rows]
+
+    def list_patterns_with_cases(self) -> list[dict[str, Any]]:
+        """Every stored pattern, its parsed signature, and the cases that exhibited it.
+
+        Structural matching needs all three at once: the signature to compare shapes,
+        the counts to weight how well the shape has been validated, and the seeds so a
+        re-run of one artifact cannot match against its own history.
+        """
+        sql = """SELECT p.*, c.id AS case_id, c.seed AS case_seed, c.outcome AS case_outcome
+                 FROM patterns p
+                 LEFT JOIN case_patterns cp ON cp.pattern_id = p.id
+                 LEFT JOIN cases c ON c.id = cp.case_id"""
+        with self._connect() as conn:
+            rows = conn.execute(sql).fetchall()
+
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            pattern = grouped.get(row["id"])
+            if pattern is None:
+                pattern = {
+                    k: row[k] for k in row.keys()
+                    if k not in ("case_id", "case_seed", "case_outcome", "signature_json")
+                }
+                pattern["signature"] = json.loads(row["signature_json"] or "{}")
+                pattern["cases"] = []
+                grouped[row["id"]] = pattern
+            if row["case_id"]:
+                pattern["cases"].append(
+                    {"id": row["case_id"], "seed": row["case_seed"], "outcome": row["case_outcome"]}
+                )
+        return list(grouped.values())

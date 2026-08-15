@@ -96,8 +96,16 @@ class Explainer:
 
         if case.pattern_matches:
             best = case.pattern_matches[0]
+            # Name which dimension matched: "resembles a prior case" means something
+            # very different when no concrete indicator is shared at all.
+            basis = {
+                "indicator": "shared infrastructure",
+                "structural": "case structure alone, with no shared infrastructure",
+                "indicator+structural": "shared infrastructure and case structure",
+            }.get(best.get("match_type", "indicator"), "shared infrastructure")
             lines.append(
-                f"Historical similarity: {best['similarity']:.0%} to {best['pattern_name']}"
+                f"Historical similarity: {best['similarity']:.0%} to {best['pattern_name']} "
+                f"via {basis}"
                 f"{' (prior outcome: ' + best['prior_outcome'] + ')' if best.get('prior_outcome') else ''}, "
                 f"independent of current reputation."
             )

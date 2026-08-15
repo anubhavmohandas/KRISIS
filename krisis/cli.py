@@ -440,9 +440,18 @@ def _render_patterns(case) -> None:
         return
     for m in case.pattern_matches:
         click.echo(
-            f"  {m['similarity']:.0%}  {m['pattern_name']}  "
-            f"matched_on={m['matched_indicators']}  prior_outcome={m.get('prior_outcome') or 'unknown'}"
+            f"  overall {m['similarity']:.0%}  "
+            f"(indicator {m.get('indicator_similarity', 0):.0%} / "
+            f"structural {m.get('structural_similarity', 0):.0%})  {m['pattern_name']}"
         )
+        click.echo(
+            f"      prior_outcome={m.get('prior_outcome') or 'unknown'}"
+            + (f"  pattern_stage={m['pattern_stage']}" if m.get("pattern_stage") else "")
+        )
+        if m.get("matched_indicators"):
+            click.echo(f"      shared indicators: {', '.join(m['matched_indicators'])}")
+        if m.get("matched_facets"):
+            click.echo(f"      shared structure:  {', '.join(m['matched_facets'])}")
 
 
 def _render_graph(graph) -> None:

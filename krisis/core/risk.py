@@ -66,6 +66,24 @@ OUTCOME_TRUST: dict[str, float] = {
 
 MIN_SIMILARITY_FOR_SCORING = 0.6
 
+
+def outcome_trust(prior_outcome: Optional[str]) -> float:
+    return OUTCOME_TRUST.get(
+        prior_outcome or Outcome.UNKNOWN.value, OUTCOME_TRUST[Outcome.UNKNOWN.value]
+    )
+
+
+def historical_impact(match: dict) -> float:
+    """How much a historical match can actually move the score: resemblance weighted
+    by how well the prior case was validated.
+
+    Callers use this to choose *which* match to score against. Ranking by raw
+    similarity instead lets a strong resemblance to a confirmed-benign case outrank
+    a weaker one to a confirmed-malicious case, and the malicious lead is then
+    silently dropped.
+    """
+    return (match.get("similarity") or 0.0) * outcome_trust(match.get("prior_outcome"))
+
 # A supporting case must be at least this much stronger than the contradicting
 # case before KRISIS calls a verdict rather than reporting the disagreement.
 CONFLICT_RATIO = 0.8
@@ -94,13 +112,13 @@ class RiskEngine:
         similarity = (historical_similarity or {}).get("similarity", 0.0)
         if historical_similarity and similarity >= MIN_SIMILARITY_FOR_SCORING:
             prior_outcome = historical_similarity.get("prior_outcome") or Outcome.UNKNOWN.value
-            trust = OUTCOME_TRUST.get(prior_outcome, OUTCOME_TRUST[Outcome.UNKNOWN.value])
-            historical_points = HISTORICAL_MAX_POINTS * similarity * trust
+            historical_points = HISTORICAL_MAX_POINTS * similarity * outcome_trust(prior_outcome)
             if historical_points > 0:
+                match_type = historical_similarity.get("match_type", "indicator")
                 support_contributors.append(
                     (
                         historical_points,
-                        f"historical similarity {similarity:.0%} to "
+                        f"historical similarity {similarity:.0%} ({match_type}) to "
                         f"{historical_similarity.get('pattern_name', 'a prior pattern')} "
                         f"(prior outcome: {prior_outcome})",
                     )
@@ -231,8 +249,7 @@ class RiskEngine:
         # Only a *validated* prior case earns a confidence bonus.
         historical_bonus = 0.0
         if historical_similarity and historical_similarity.get("similarity", 0) >= MIN_SIMILARITY_FOR_SCORING:
-            prior_outcome = historical_similarity.get("prior_outcome") or Outcome.UNKNOWN.value
-            if OUTCOME_TRUST.get(prior_outcome, 0.0) >= 1.0:
+            if outcome_trust(historical_similarity.get("prior_outcome")) >= 1.0:
                 historical_bonus = 0.1
 
         # Confidence is capped by how much of the intended evidence base actually

@@ -30,7 +30,7 @@ from .indicators import classify_seed, domain_from_url, extract_from_text
 from .models import Case, Coverage, Entity, EntityType, Evidence, Relationship
 from .pivot_engine import InvestigationBudget, PivotEngine
 from .recommend import recommend_action
-from .risk import RiskEngine
+from .risk import RiskEngine, historical_impact
 
 
 @dataclass
@@ -157,7 +157,11 @@ class Investigator:
         correlation = self.correlation_engine.correlate(graph, all_evidence, exclude_seed=case.seed)
         trace.log("correlation", **correlation.to_dict())
 
-        historical = correlation.pattern_matches[0] if correlation.pattern_matches else None
+        # The match that scores is the one with the most impact, not the one that
+        # merely resembles hardest: a strong resemblance to a confirmed-benign case
+        # carries no threat weight and must not displace a weaker match to a
+        # confirmed-malicious one.
+        historical = max(correlation.pattern_matches, key=historical_impact, default=None)
         case.pattern_matches = correlation.pattern_matches
 
         trace.log("coverage", **coverage.to_dict())
