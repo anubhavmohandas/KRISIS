@@ -67,6 +67,47 @@ class TestDomainReputationIsCheckable(unittest.TestCase):
         self.assertIn("9 of 70 VirusTotal engines", evidence.provenance)
 
 
+class TestIPReputationIsChecked(unittest.TestCase):
+    """A bare IP is a first-class KRISIS seed (see cli.py's own TARGET help text:
+    'a URL, domain, IP, file hash, or a message'), and every domain resolves to
+    one — IPs are the single most common pivot target in the whole graph. If
+    VirusTotal never supports EntityType.IP, no IP investigation can ever earn a
+    threat-reputation source, so RiskEngine can never emit anything but
+    INSUFFICIENT_EVIDENCE for an IP no matter how malicious VT's own data says it
+    is. That is a standing false-negative, not a graceful degradation."""
+
+    PAYLOAD = {
+        "response_code": 1,
+        "detected_urls": [
+            {"url": "http://1.2.3.4/a", "positives": 30, "total": 60},
+        ],
+        "resolutions": [
+            {"hostname": "phish.example", "last_resolved": "2024-01-01"},
+        ],
+    }
+
+    def test_ip_is_a_supported_entity_type(self):
+        collector = VirusTotalCollector(api_key="test-key")
+        self.assertTrue(collector.can_handle(Entity(value="1.2.3.4", type=EntityType.IP)))
+
+    def test_ip_reputation_is_checkable(self):
+        result = _collect(self.PAYLOAD, entity_type=EntityType.IP, value="1.2.3.4")
+        self.assertTrue(result.available)
+        reputation = next(e for e in result.evidence if e.evidence_type == "reputation")
+        self.assertEqual(reputation.value, "30/60")
+        self.assertEqual(reputation.polarity, Polarity.SUPPORTS_THREAT)
+
+    def test_ip_resolutions_become_pivot_candidates(self):
+        result = _collect(self.PAYLOAD, entity_type=EntityType.IP, value="1.2.3.4")
+        domains = [e for e in result.evidence if e.signal == "vt_related_domain"]
+        self.assertTrue(any(e.value == "phish.example" for e in domains))
+
+    def test_a_clean_ip_still_reads_as_checked_not_unavailable(self):
+        result = _collect({"response_code": 1}, entity_type=EntityType.IP, value="8.8.8.8")
+        self.assertTrue(result.available)
+        self.assertEqual(result.evidence[0].signal, "no_detections")
+
+
 class TestUnavailableIsNotClean(unittest.TestCase):
     def test_no_data_for_the_artifact_is_reported_as_unavailable(self):
         result = _collect({"response_code": 0})

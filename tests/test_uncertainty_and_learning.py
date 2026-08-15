@@ -22,6 +22,7 @@ from krisis.core.models import (
     Entity,
     EntityType,
     Evidence,
+    Independence,
     Outcome,
     Polarity,
     RiskCategory,
@@ -95,6 +96,57 @@ class TestNotCheckedIsNotSafe(unittest.TestCase):
         result = self.engine.score(CorrelationResult())
         advice = recommend_action(result)
         self.assertIn("NOT a clean result", advice)
+
+    def test_low_confidence_low_category_is_downgraded_not_just_the_advice(self):
+        """A LOW category earned on one answering source out of five is not a claim
+        KRISIS can stand behind. Delete the confidence check in RiskEngine.score and
+        the category badge, the stored case, and the risk_category column indicator
+        memory tags future matches with all say LOW while confidence sits under 25% —
+        a contradiction a reader (and future historical matching) should never see."""
+        neutral = [Evidence(
+            source="virustotal", entity_id="e1", signal="no_detections", value=0,
+            evidence_type="reputation", polarity=Polarity.NEUTRAL, confidence=0.3,
+        )]
+        coverage = Coverage(
+            attempted={"dns", "whois", "tls", "identity", "virustotal"},
+            available={"virustotal"}, evidence_types={"reputation"},
+        )
+        result = self.engine.score(
+            CorrelationResult(neutral=neutral, evidence_diversity=0.2), coverage=coverage
+        )
+        self.assertLess(result.confidence, 0.25)
+        self.assertEqual(result.category, RiskCategory.INSUFFICIENT_EVIDENCE)
+        self.assertIn("confidence", result.uncertainty["reason"].lower())
+        # recommend_action must no longer need its own special case for this: the
+        # category alone now selects the right advice.
+        self.assertIn("NOT a clean result", recommend_action(result))
+
+    def test_low_confidence_medium_is_not_collapsed_into_insufficient_evidence(self):
+        """MEDIUM never claims safety, unlike LOW — so unlike the case above, a low
+        confidence MEDIUM must survive as MEDIUM, not get folded into a generic
+        INSUFFICIENT_EVIDENCE. This is the identity-impersonation floor's realistic
+        shape: a verified lookalike_domain finding (identity_collector already ran
+        the full existence/age/ownership check) while everything else about the
+        artifact — DNS/WHOIS/TLS/VT on the artifact itself — failed to answer, which
+        is exactly the freshly-registered-lookalike case this floor exists for.
+        Broadening the LOW-confidence downgrade to include MEDIUM would silently
+        erase the specific impersonation reason behind a generic 'low confidence'
+        message — the regression this test catches."""
+        identity_ev = Evidence(
+            source="identity", entity_id="e1", signal="lookalike_domain", value="netflix.example",
+            evidence_type="identity", polarity=Polarity.SUPPORTS_THREAT, confidence=0.8,
+            independence=Independence.INDEPENDENT,
+        )
+        coverage = Coverage(
+            attempted={"dns", "whois", "tls", "virustotal", "identity"},
+            available={"identity"}, evidence_types={"identity"},
+        )
+        result = self.engine.score(
+            CorrelationResult(supporting=[identity_ev], evidence_diversity=0.4), coverage=coverage
+        )
+        self.assertLess(result.confidence, 0.25, "fixture must actually be low-confidence")
+        self.assertEqual(result.category, RiskCategory.MEDIUM)
+        self.assertIn("imitates", result.uncertainty["reason"])
 
 
 class TestAFlaggedArtifactIsNeverCalledLow(unittest.TestCase):

@@ -283,7 +283,7 @@ def investigate(
     if show_trace:
         _render_trace(trace)
 
-    _render_provider_usage(case)
+    _render_provider_usage(case.provider_usage)
     _render_source_status()
 
     if case.provider_failures:
@@ -359,6 +359,27 @@ def cases(db_path, limit):
 
 @cli.command()
 @click.argument("case_id")
+@click.option("--db", "db_path", default=DEFAULT_DB_PATH, show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="Print the full stored case as JSON.")
+def show(case_id, db_path, as_json):
+    """Show a previously stored investigation (see `krisis cases` for ids).
+
+    `krisis cases` only ever printed one summary line per case — there was no way
+    to look back at what an old investigation actually found. This replays it from
+    what was stored: risk, evidence, provider usage, and the explanation.
+    """
+    data = Storage(db_path).get_case(case_id)
+    if not data:
+        click.secho(f"[-] No such case: {case_id}", fg="red")
+        sys.exit(1)
+    if as_json:
+        click.echo(json.dumps(data, indent=2, default=str))
+        return
+    _render_stored_case(data)
+
+
+@cli.command()
+@click.argument("case_id")
 @click.argument("outcome", type=click.Choice([o.value for o in Outcome]))
 @click.option("--db", "db_path", default=DEFAULT_DB_PATH, show_default=True)
 def outcome(case_id, outcome, db_path):
@@ -414,6 +435,11 @@ def _render_case(case) -> None:
             # signal, and identical unattributed lines read as duplicated evidence.
             subject = f" [{entity.value}]" if entity else ""
             click.echo(f"  - {c['signal']}{subject}: {c['value']}")
+        # Some of the above is listed for completeness but was excluded from the
+        # score arithmetic (see risk._discount_narrow_contradictions) — without this,
+        # it reads as evidence that offsets the finding above it, when it does not.
+        for note in risk.uncertainty.get("discounted_counter_evidence") or []:
+            click.secho(f"    note: {note}", fg="bright_black")
 
     if risk.historical_similarity:
         hs = risk.historical_similarity
@@ -468,16 +494,16 @@ def _render_patterns(case) -> None:
             click.echo(f"      shared structure:  {', '.join(m['matched_facets'])}")
 
 
-def _render_provider_usage(case) -> None:
+def _render_provider_usage(usage_by_provider: dict) -> None:
     """What each provider cost this investigation, and what KRISIS chose not to spend.
 
     Shown by default rather than behind a flag: the live runs that motivated the
     planner burned a provider's quota without anything in the output saying so.
     """
-    if not case.provider_usage:
+    if not usage_by_provider:
         return
     click.echo("\n--- Provider Usage ---")
-    for name, usage in case.provider_usage.items():
+    for name, usage in usage_by_provider.items():
         parts = [f"calls {usage['calls']}"]
         for label, key in (("cached", "cached"), ("reused", "deduplicated"),
                            ("skipped", "skipped"), ("rate limited", "rate_limited")):
@@ -499,6 +525,68 @@ def _render_trace(trace) -> None:
     for i, step in enumerate(trace.steps, 1):
         stage = step.pop("stage")
         click.echo(f"  {i:>3}. {stage:<22} {step}")
+
+
+def _render_stored_case(data: dict) -> None:
+    """The `krisis show` counterpart to _render_case: same layout, but reading
+    a case back out of storage — plain dicts (Case.to_dict()'s own shape), not
+    the live typed Case/RiskAssessment a just-completed investigation returns."""
+    risk = data.get("risk") or {}
+    if not risk:
+        click.secho("[-] Stored case has no risk assessment.", fg="red")
+        return
+
+    color = _CATEGORY_COLOR.get(RiskCategory(risk["category"]), "white")
+    click.echo()
+    click.secho(f"Risk: {risk['category']}", fg=color, bold=True, nl=False)
+    click.echo(f"   Score: {risk['score']}/100   Confidence: {risk['confidence']:.0%}")
+
+    uncertainty = risk.get("uncertainty") or {}
+    if uncertainty.get("reason"):
+        label = "Why this is not a verdict" if risk["category"] in (
+            c.value for c in INDECISIVE
+        ) else "Why this verdict was qualified"
+        click.secho(f"\n{label}: {uncertainty['reason']}.", fg=color)
+    if uncertainty.get("unavailable_sources"):
+        click.echo(
+            "Not checked: " + ", ".join(uncertainty["unavailable_sources"])
+            + "  (absence of data from these is not evidence of safety)"
+        )
+
+    if risk.get("top_contributors"):
+        click.echo("\nPrimary contributors:")
+        for c in risk["top_contributors"]:
+            click.echo(f"  - {c}")
+
+    entities_by_id = {e["id"]: e for e in data.get("entities", [])}
+    contradicting = [ev for ev in data.get("evidence", []) if ev.get("polarity") == "contradicts_threat"]
+    if contradicting:
+        click.echo("\nCounter-evidence:")
+        for c in contradicting[:5]:
+            entity = entities_by_id.get(c.get("entity_id"))
+            subject = f" [{entity['value']}]" if entity else ""
+            click.echo(f"  - {c['signal']}{subject}: {c['value']}")
+        for note in uncertainty.get("discounted_counter_evidence") or []:
+            click.secho(f"    note: {note}", fg="bright_black")
+
+    if risk.get("historical_similarity"):
+        hs = risk["historical_similarity"]
+        click.echo(f"\nHistorical similarity: {hs['similarity']:.0%} to {hs['pattern_name']}")
+
+    click.echo(f"\n{data.get('explanation', '')}")
+    click.echo()
+    click.secho("Recommended action:", bold=True)
+    click.echo(f"  {data.get('recommendation', '')}")
+
+    _render_provider_usage(data.get("provider_usage") or {})
+
+    failures = data.get("provider_failures") or []
+    if failures:
+        click.secho(f"\n[!] {len(failures)} evidence source(s) unavailable:", fg="yellow")
+        for note in failures:
+            click.echo(f"    - {note}")
+
+    click.secho(f"\n[case: {data['id']}, seed: {data['seed']}]", fg="bright_black")
 
 
 def main():

@@ -66,6 +66,13 @@ OUTCOME_TRUST: dict[str, float] = {
 
 MIN_SIMILARITY_FOR_SCORING = 0.6
 
+# Below this, a LOW/MEDIUM category is not actually earned: too little of the
+# intended evidence base answered for "looks safe" or "some suspicion" to be a
+# claim KRISIS can stand behind (see RISK VS CONFIDENCE — they are allowed to
+# disagree, but not silently: the category itself must reflect it, not just the
+# advice text, or the case gets stored as LOW while the explanation says otherwise).
+LOW_CONFIDENCE_THRESHOLD = 0.25
+
 # Combined brand-impersonation + credential-collection evidence is materially
 # stronger than either alone: a domain that merely doesn't match its page's
 # claimed name, or a form that merely asks for a password, is each
@@ -96,13 +103,28 @@ def historical_impact(match: dict) -> float:
     """
     return (match.get("similarity") or 0.0) * outcome_trust(match.get("prior_outcome"))
 
-# Counter-evidence that establishes something narrower than it appears to. A
-# certificate proves control of the endpoint it was issued for; it says nothing
-# about whether the operator is the organization the name resembles, and any
-# attacker can obtain one in minutes. Letting it net off against an identity
-# finding would mean a phishing site could rebut "this imitates someone else" by
-# doing what every phishing site already does.
-NARROW_CONTRADICTIONS = frozenset({"valid_tls_present"})
+# Counter-evidence that establishes something narrower than it appears to, keyed
+# on signal name -> why it does not actually rebut an identity finding. Neither
+# of these establishes that the operator is the organization the name resembles
+# (see NEVER CONFUSE IDENTITY SIMILARITY WITH OWNERSHIP): a certificate proves
+# control of the endpoint it was issued for, and any attacker can obtain one in
+# minutes; how long a domain has existed says nothing about who runs it, and
+# identity_collector.same_operator() already confirmed the operator does *not*
+# match before lookalike_domain was ever emitted — a long-running impersonation
+# is not less of one for having run a while. Letting either net off against an
+# identity finding would mean a phishing site could rebut "this imitates someone
+# else" by doing what most phishing sites already have.
+NARROW_CONTRADICTIONS: dict[str, str] = {
+    "valid_tls_present": (
+        "a valid certificate proves control of this endpoint, not that its "
+        "operator is the organization this name resembles"
+    ),
+    "long_lived_domain": (
+        "how long this domain has existed says nothing about who operates it — "
+        "identity_collector already confirmed the operator does not match the "
+        "identity this name resembles before reporting the impersonation"
+    ),
+}
 
 
 def _identity_support(supporting: list[Evidence]) -> list[Evidence]:
@@ -122,12 +144,9 @@ def _discount_narrow_contradictions(
         return contradicting, []
     kept, notes = [], []
     for ev in contradicting:
-        if ev.signal in NARROW_CONTRADICTIONS:
-            notes.append(
-                f"'{ev.signal}' ({ev.source}) is reported but does not offset the identity "
-                f"finding: a valid certificate proves control of this endpoint, not that its "
-                f"operator is the organization this name resembles"
-            )
+        why = NARROW_CONTRADICTIONS.get(ev.signal)
+        if why:
+            notes.append(f"'{ev.signal}' ({ev.source}) is reported but does not offset the identity finding: {why}")
         else:
             kept.append(ev)
     return kept, notes
@@ -204,6 +223,21 @@ class RiskEngine:
         if discounted:
             uncertainty["discounted_counter_evidence"] = discounted
         confidence = self._confidence(correlation, historical_similarity, coverage)
+
+        # LOW only: it is the one category that asserts safety ("nothing looked
+        # suspicious, and enough was actually checked to say so"), so it is the one
+        # category low confidence can invalidate outright. MEDIUM/HIGH/CRITICAL
+        # already assert a concern, never safety — RISK VS CONFIDENCE explicitly
+        # allows those to carry low confidence instead of being collapsed away
+        # (e.g. a verified identity-impersonation MEDIUM must survive thin
+        # surrounding coverage: confidence says so in the same breath, it must not
+        # silently erase the specific finding behind a generic "insufficient" reason).
+        if confidence < LOW_CONFIDENCE_THRESHOLD and category == RiskCategory.LOW:
+            uncertainty["reason"] = (
+                f"confidence in this assessment is too low ({confidence:.0%}) to assert "
+                f"{category.value} risk; too little of the intended evidence base actually answered"
+            )
+            category = RiskCategory.INSUFFICIENT_EVIDENCE
 
         # Rank by actual contribution, not alphabetically — "top contributors" has
         # to mean the evidence that moved the score most.

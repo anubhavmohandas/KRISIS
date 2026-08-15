@@ -57,13 +57,13 @@ INDECISIVE = (
 def recommend_action(risk: RiskAssessment) -> str:
     base = _ACTIONS.get(risk.category, _ACTIONS[RiskCategory.UNKNOWN])
 
-    # A reassuring verdict reached on weak evidence is the one failure mode with a
-    # real-world cost, so low confidence downgrades the advice rather than the score.
-    if risk.confidence < 0.25 and risk.category in (RiskCategory.LOW, RiskCategory.MEDIUM):
-        base = (
-            f"{_ACTIONS[RiskCategory.INSUFFICIENT_EVIDENCE]} "
-            f"(Confidence in this specific assessment was low: {risk.confidence:.0%}.)"
-        )
+    # A LOW category reached on too little confidence is downgraded to
+    # INSUFFICIENT_EVIDENCE by RiskEngine itself (see risk.LOW_CONFIDENCE_THRESHOLD)
+    # — the category, not just this advice text, has to say so, or the case gets
+    # stored and displayed as a clean verdict it never earned. MEDIUM/HIGH/CRITICAL
+    # are never touched by this: they already assert a concern, not safety, so a
+    # low-confidence MEDIUM is left as MEDIUM — confidence disagreeing with risk is
+    # meaningful information, not a defect to paper over (see RISK VS CONFIDENCE).
 
     # Any category that had to qualify itself states the qualification: a verdict
     # KRISIS could only reach with a caveat is misleading once the caveat is dropped.

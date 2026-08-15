@@ -107,6 +107,11 @@ class Explainer:
         if correlation.contradicting:
             top = ", ".join(f"{e.signal} ({e.source})" for e in correlation.contradicting[:4])
             lines.append(f"Contradicting evidence: {top}.")
+            # See risk._discount_narrow_contradictions: some of the above is listed
+            # for completeness but was not allowed to offset the finding above it —
+            # without saying so, a reader has no way to tell the two apart.
+            for note in risk.uncertainty.get("discounted_counter_evidence") or []:
+                lines.append(note + ".")
         else:
             lines.append("No contradicting evidence was found.")
 

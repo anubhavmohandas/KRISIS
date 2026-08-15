@@ -90,7 +90,7 @@ class Coverage:
     """
 
     attempted: set[str] = field(default_factory=set)        # collector names asked about the seed
-    available: set[str] = field(default_factory=set)        # collector names that returned data
+    available: set[str] = field(default_factory=set)        # collector names that answered (even with nothing to report)
     evidence_types: set[str] = field(default_factory=set)   # evidence_type values actually obtained
 
     @property

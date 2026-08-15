@@ -105,6 +105,29 @@ class TestModelBoundary(unittest.TestCase):
             explanation = Explainer(use_llm=False).explain(case, EntityGraph(), correlation)
         self.assertIn("MEDIUM", explanation)
 
+    def test_discounted_counter_evidence_is_not_silently_dropped(self):
+        """A counter-evidence item the risk engine excluded from the score
+        arithmetic (e.g. a valid certificate that does not rebut an identity
+        finding) must say so in the fallback explanation — the one path every
+        user sees whether or not an AI key is configured. Otherwise the reader
+        sees 'Contradicting evidence: valid_tls_present' with no hint that it was
+        never allowed to offset the finding above it."""
+        case, correlation = _case()
+        tls = Evidence(
+            source="tls", entity_id="root", signal="valid_tls_present", value="Some CA",
+            evidence_type="infrastructure", polarity=Polarity.CONTRADICTS_THREAT,
+            confidence=0.25, independence=Independence.INDEPENDENT,
+        )
+        correlation.contradicting = [tls]
+        case.risk.contradicting = [tls.to_dict()]
+        case.risk.uncertainty["discounted_counter_evidence"] = [
+            "'valid_tls_present' (tls) is reported but does not offset the identity "
+            "finding: a valid certificate proves control of this endpoint, not that its "
+            "operator is the organization this name resembles"
+        ]
+        explanation = Explainer(use_llm=False).explain(case, EntityGraph(), correlation)
+        self.assertIn("does not offset the identity finding", explanation)
+
     def test_a_failing_model_falls_back_instead_of_failing_the_case(self):
         """Delete the fallback in explain() and a provider outage takes out the
         explanation of an investigation that already completed."""

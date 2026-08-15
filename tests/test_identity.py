@@ -229,6 +229,13 @@ class TestRiskTreatmentOfIdentity(unittest.TestCase):
             confidence=0.25, independence=Independence.INDEPENDENT,
         )
 
+    def _age(self):
+        return Evidence(
+            source="whois", entity_id="e1", signal="long_lived_domain", value=1200,
+            evidence_type="registration", polarity=Polarity.CONTRADICTS_THREAT,
+            confidence=0.55, independence=Independence.INDEPENDENT,
+        )
+
     def test_an_impersonating_artifact_is_never_reported_as_low(self):
         """Delete the identity branch in RiskEngine._categorize and a verified
         typosquat with unremarkable infrastructure is reported as looking safe — the
@@ -272,6 +279,45 @@ class TestRiskTreatmentOfIdentity(unittest.TestCase):
             )
         )
         self.assertLess(with_tls.score, alone.score)
+
+    def test_domain_age_does_not_offset_an_identity_finding_either(self):
+        """Same defect class as the certificate case, different signal: how long a
+        domain has existed says nothing about who runs it, and identity_collector
+        already confirmed the operator does not match before lookalike_domain was
+        ever emitted. Delete 'long_lived_domain' from NARROW_CONTRADICTIONS and a
+        years-old typosquat quietly scores lower than a freshly-registered one for
+        no reason connected to who operates it."""
+        engine = RiskEngine()
+        alone = engine.score(CorrelationResult(supporting=[self._identity()], evidence_diversity=0.4))
+        with_age = engine.score(
+            CorrelationResult(
+                supporting=[self._identity()], contradicting=[self._age()], evidence_diversity=0.4
+            )
+        )
+        self.assertEqual(alone.score, with_age.score)
+        self.assertTrue(with_age.uncertainty["discounted_counter_evidence"])
+        self.assertEqual(
+            len(with_age.contradicting), 1,
+            "the discounted item must still be reported to the reader",
+        )
+
+    def test_domain_age_still_counts_against_an_ordinary_finding(self):
+        """The discount is scoped to identity findings, not a blanket exemption —
+        a long-lived domain is still legitimate counter-evidence for e.g. a raw
+        VirusTotal detection, which age genuinely does argue against."""
+        engine = RiskEngine()
+        infrastructure = Evidence(
+            source="vt", entity_id="e1", signal="malicious_detection", value="4/70",
+            evidence_type="reputation", polarity=Polarity.SUPPORTS_THREAT, confidence=0.9,
+            independence=Independence.INDEPENDENT,
+        )
+        alone = engine.score(CorrelationResult(supporting=[infrastructure], evidence_diversity=0.4))
+        with_age = engine.score(
+            CorrelationResult(
+                supporting=[infrastructure], contradicting=[self._age()], evidence_diversity=0.4
+            )
+        )
+        self.assertLess(with_age.score, alone.score)
 
 
 # -- end-to-end: identity becomes a graph edge --------------------------------

@@ -58,6 +58,14 @@ def _a_evidence(entity_id, value):
                     evidence_type="infrastructure", confidence=0.9)
 
 
+def _cert_evidence(entity_id, value):
+    # Matches TLSCollector's real confidence for this signal (krisis/collectors/
+    # tls_collector.py) — the test has to use the actual value a live investigation
+    # would produce, not a convenient one, or it proves nothing about reachability.
+    return Evidence(source="tls", entity_id=entity_id, signal="certificate_fingerprint",
+                    value=value, evidence_type="infrastructure", confidence=0.85)
+
+
 class TestPivotCommodityPenalty(unittest.TestCase):
     def setUp(self):
         self.engine = PivotEngine(InvestigationBudget())
@@ -96,6 +104,29 @@ class TestPivotCommodityPenalty(unittest.TestCase):
         pivots = engine.generate(self.seed, [_a_evidence(self.seed.id, "203.0.113.7")])
         self.assertTrue(pivots[0].shared_infrastructure)
         self.assertIn("12 unrelated prior investigations", pivots[0].reason)
+
+    def test_a_strong_enough_commodity_signal_survives_as_a_low_priority_lead(self):
+        """The class docstring above (and THIRD_PARTY_PENALTY's own comment) both say
+        a commodity pivot is down-weighted, not eliminated: 'shared hosting genuinely
+        matters when the seed itself is suspicious, so the pivot survives as a
+        low-priority candidate rather than being silently dropped.' certificate_fingerprint
+        is PIVOT_RULES' highest-priority signal and TLSCollector's real confidence for
+        it (0.85) — if even this can never survive the commodity penalty, the promise
+        is false for every relation type, not just the weak ones the other tests in
+        this class cover (mx_record, registrar mailbox), which stay rejected regardless
+        of the penalty because their own base priority is already low."""
+        engine = PivotEngine(InvestigationBudget(), case_count_lookup=lambda t, v: 25)
+        pivots = engine.generate(
+            self.seed, [_cert_evidence(self.seed.id, "shared-hosting-provider-default-cert")]
+        )
+        pivot = pivots[0]
+        self.assertTrue(pivot.shared_infrastructure)
+        self.assertGreater(pivot.priority, 0.0, "downweighted must not mean eliminated")
+        decided = engine.accept_or_reject(pivot, current_depth_count=0)
+        self.assertEqual(
+            decided.status, "accepted",
+            f"a real shared-hosting lead on a suspicious seed must survive, got priority={pivot.priority:.3f}",
+        )
 
     def test_lookup_failure_is_not_fatal(self):
         def boom(entity_type, value):

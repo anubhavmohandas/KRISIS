@@ -22,7 +22,7 @@ from .base import CollectorResult, EvidenceCollector
 
 class VirusTotalCollector(EvidenceCollector):
     name = "virustotal"
-    supports = ("domain", "url", "hash")
+    supports = ("domain", "url", "hash", "ip")
 
     BASE_URL = "https://www.virustotal.com/vtapi/v2"
 
@@ -40,6 +40,8 @@ class VirusTotalCollector(EvidenceCollector):
                 return self._collect_url(entity)
             if entity.type.value == "hash":
                 return self._collect_hash(entity)
+            if entity.type.value == "ip":
+                return self._collect_ip(entity)
         except requests.RequestException as exc:
             return CollectorResult(evidence=[], available=False, note=f"network error: {exc}")
         except Exception as exc:
@@ -136,6 +138,70 @@ class VirusTotalCollector(EvidenceCollector):
                     confidence=0.3,
                     independence=Independence.INDEPENDENT,
                     provenance="VirusTotal has no detection history for this domain (absence of evidence, not evidence of absence)",
+                )
+            )
+
+        return CollectorResult(evidence=evidence, available=True)
+
+    def _collect_ip(self, entity: Entity) -> CollectorResult:
+        resp = requests.get(
+            f"{self.BASE_URL}/ip-address/report",
+            params={"apikey": self.api_key, "ip": entity.value},
+            timeout=10,
+        )
+        status = self._check_status(resp)
+        if status is not None:
+            return status
+        data = resp.json()
+
+        evidence: list[Evidence] = []
+
+        detected_urls = data.get("detected_urls", [])
+        if detected_urls:
+            positives = sum(u.get("positives", 0) for u in detected_urls)
+            total_checks = sum(u.get("total", 1) for u in detected_urls) or 1
+            evidence.append(
+                self._reputation_evidence(
+                    entity, positives / total_checks, positives, total_checks,
+                    subject=f"engine checks across {len(detected_urls)} known URLs on this IP",
+                )
+            )
+
+        # Domains that have historically resolved to this IP — the reverse of a
+        # domain report's own "resolutions" field. Reuses vt_related_domain/
+        # vt_related (pivot_engine.PIVOT_RULES): the meaning is the same either
+        # direction — "VirusTotal reports a direct relationship" — and shared
+        # hosting on a suspicious IP is exactly the overlap that relation exists
+        # to surface.
+        for res in data.get("resolutions", [])[:15]:
+            hostname = res.get("hostname")
+            if hostname:
+                evidence.append(
+                    Evidence(
+                        source=self.name,
+                        entity_id=entity.id,
+                        signal="vt_related_domain",
+                        value=hostname,
+                        evidence_type="infrastructure",
+                        polarity=Polarity.NEUTRAL,
+                        confidence=0.5,
+                        independence=Independence.DERIVED,
+                        provenance=f"VirusTotal-reported historical resolution ({res.get('last_resolved', 'unknown date')})",
+                    )
+                )
+
+        if not evidence:
+            evidence.append(
+                Evidence(
+                    source=self.name,
+                    entity_id=entity.id,
+                    signal="no_detections",
+                    value=0,
+                    evidence_type="reputation",
+                    polarity=Polarity.NEUTRAL,
+                    confidence=0.3,
+                    independence=Independence.INDEPENDENT,
+                    provenance="VirusTotal has no detection history for this IP (absence of evidence, not evidence of absence)",
                 )
             )
 

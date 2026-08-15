@@ -76,6 +76,8 @@ krisis investigate message.txt --file             # mine a message body for URLs
 krisis investigate <sha256> --hash                # investigate a file hash
 
 krisis cases                                      # list stored investigations
+krisis show <case_id>                             # replay a stored investigation (risk, evidence, explanation)
+krisis show <case_id> --json                      # ...as the full stored case JSON
 krisis outcome <case_id> confirmed_malicious      # close the learning loop
 krisis outcome <case_id> confirmed_benign         # the only outcome that neutralises future risk
 ```

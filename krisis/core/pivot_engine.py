@@ -37,7 +37,14 @@ IDENTITY_RELATIONS = frozenset({"looks_like"})
 # How hard a third-party commodity pivot is down-weighted. Not zero: shared hosting
 # genuinely matters when the *seed itself* is suspicious, so the pivot survives as a
 # low-priority candidate rather than being silently dropped.
-THIRD_PARTY_PENALTY = 0.25
+#
+# Must stay above ~0.267: acceptance requires priority >= 0.2 (see accept_or_reject),
+# and the highest priority any pivot can reach before this penalty is 0.75 — the
+# certificate_fingerprint base rate, the strongest signal in PIVOT_RULES — at
+# confidence 1.0. Below that ratio, no commodity-flagged pivot of any strength can
+# ever clear the floor, and "down-weighted" silently becomes "always dropped" for
+# every relation type, including the shared-hosting case this constant exists for.
+THIRD_PARTY_PENALTY = 0.3
 
 # An indicator already seen across this many distinct prior investigations is
 # commodity infrastructure by observation, whatever its name suggests.

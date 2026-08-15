@@ -85,7 +85,7 @@ class Investigator:
         # user actually asked about.
         coverage = Coverage()
 
-        seed_entities = self._seed_entities(seed_type, seed_value, trace)
+        seed_entities, seed_edges = self._seed_entities(seed_type, seed_value, trace)
         queue: deque[Entity] = deque()
         # The graph deduplicates entities, but the queue must too: the same entity is
         # reachable by several routes (a URL and its extracted domain, or two sources
@@ -99,10 +99,30 @@ class Investigator:
                 queued.add(entity.id)
                 queue.append(entity)
 
+        # key() -> the (possibly deduplicated) Entity actually stored in the graph,
+        # so a message that mentions the same domain twice still resolves both
+        # edges to the one surviving node.
+        key_to_entity: dict[str, Entity] = {}
         for e in seed_entities:
             added = graph.add_entity(e)
             case.entities[added.id] = added
+            key_to_entity[e.key()] = added
             enqueue(added)
+
+        # Seed extraction (message -> URL, URL -> its domain) is itself an observed
+        # relationship (see GRAPH IS PART OF THE REASONING) — without these edges the
+        # graph shows the message and everything found in it as unconnected islands.
+        for source_key, target_key, relation_type, reason in seed_edges:
+            source = key_to_entity.get(source_key)
+            target = key_to_entity.get(target_key)
+            if not source or not target or source.id == target.id:
+                continue
+            rel = Relationship(
+                source_entity_id=source.id, target_entity_id=target.id,
+                relation_type=relation_type, reason=reason,
+            )
+            graph.add_relationship(rel)
+            case.relationships[rel.id] = rel
 
         fanout_counter: Counter = Counter()
 
@@ -219,25 +239,41 @@ class Investigator:
         except Exception:
             return 0
 
-    def _seed_entities(self, seed_type: EntityType, seed_value: str, trace: InvestigationTrace) -> list[Entity]:
-        entities = [Entity(value=seed_value, type=seed_type, depth=0)]
+    def _seed_entities(
+        self, seed_type: EntityType, seed_value: str, trace: InvestigationTrace
+    ) -> tuple[list[Entity], list[tuple[str, str, str, str]]]:
+        """Entities extracted from the raw input, plus the edges between them as
+        (source_key, target_key, relation_type, reason) — Entity.key() pairs,
+        resolved to ids by the caller once every seed entity has been added to the
+        graph (dedup can decide which id a key ultimately resolves to)."""
+        seed = Entity(value=seed_value, type=seed_type, depth=0)
+        entities = [seed]
+        edges: list[tuple[str, str, str, str]] = []
 
         if seed_type == EntityType.URL:
             domain = domain_from_url(seed_value)
             if domain:
-                entities.append(Entity(value=domain, type=EntityType.DOMAIN, depth=0))
+                domain_entity = Entity(value=domain, type=EntityType.DOMAIN, depth=0)
+                entities.append(domain_entity)
+                edges.append((seed.key(), domain_entity.key(), "has_domain", "domain component of this URL"))
 
         if seed_type == EntityType.MESSAGE:
             extracted = extract_from_text(seed_value)
             trace.log("secondary_extraction", found=[f"{t.value}:{v}" for t, v in extracted])
             for etype, value in extracted:
-                entities.append(Entity(value=value, type=etype, depth=0))
+                item = Entity(value=value, type=etype, depth=0)
+                entities.append(item)
+                edges.append((seed.key(), item.key(), "mentions", f"{etype.value} extracted from message text"))
                 if etype == EntityType.URL:
                     domain = domain_from_url(value)
                     if domain:
-                        entities.append(Entity(value=domain, type=EntityType.DOMAIN, depth=0))
+                        domain_entity = Entity(value=domain, type=EntityType.DOMAIN, depth=0)
+                        entities.append(domain_entity)
+                        edges.append(
+                            (item.key(), domain_entity.key(), "has_domain", "domain component of this URL")
+                        )
 
-        return entities
+        return entities, edges
 
     def _collect_for_entity(
         self, entity: Entity, case: Case, trace: InvestigationTrace, coverage: Coverage
@@ -268,9 +304,15 @@ class Investigator:
                 trace.log("collector_unavailable", collector=collector.name, entity=entity.value, note=result.note)
                 continue
 
-            if is_seed and result.evidence:
+            # result.available is already True here (checked above): the collector
+            # ran and answered, whether or not it found anything to report. A domain
+            # with no lookalike candidate or a message with no urgency language is a
+            # real, clean check (see identity_collector/message_collector) — treating
+            # it as "not checked" would turn a genuine negative into a false gap.
+            if is_seed:
                 coverage.available.add(collector.name)
-                coverage.evidence_types.update(ev.evidence_type for ev in result.evidence)
+                if result.evidence:
+                    coverage.evidence_types.update(ev.evidence_type for ev in result.evidence)
 
             for ev in result.evidence:
                 case.evidence[ev.id] = ev

@@ -78,6 +78,18 @@ class FailingWHOISCollector(EvidenceCollector):
         return CollectorResult(evidence=[], available=False, note="simulated provider outage")
 
 
+class CleanNothingFoundCollector(EvidenceCollector):
+    """Answers successfully but has nothing to report — the normal shape of
+    identity_collector/message_collector on an unremarkable artifact. Must be
+    counted as checked, not as an unavailable source."""
+
+    name = "identity"
+    supports = ("domain",)
+
+    def collect(self, entity: Entity) -> CollectorResult:
+        return CollectorResult(evidence=[], available=True, note="no lookalike candidate derived from this name")
+
+
 class TestInvestigatorIntegration(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -117,6 +129,43 @@ class TestInvestigatorIntegration(unittest.TestCase):
         self.assertIsNotNone(stored)
         self.assertEqual(stored["seed"], "suspicious-login.com")
 
+    def test_url_seed_connects_to_its_domain_in_the_graph(self):
+        # See GRAPH IS PART OF THE REASONING: "URL -> domain" is a required edge,
+        # not two unrelated nodes that happen to share a graph.
+        investigator = self._investigator()
+        investigator.investigate("https://suspicious-login.com/verify")
+        graph = investigator.last_graph
+
+        url_entity = next(e for e in graph.entities() if e.type.value == "url")
+        domain_entity = next(e for e in graph.entities() if e.type.value == "domain" and e.depth == 0)
+        rels = graph.relationships_for(url_entity.id)
+        self.assertTrue(
+            any(r.relation_type == "has_domain" and r.target_entity_id == domain_entity.id for r in rels),
+            "expected a has_domain edge connecting the seed URL to its domain",
+        )
+
+    def test_message_seed_connects_to_extracted_url_and_domain(self):
+        # See GRAPH IS PART OF THE REASONING: "message -> URL" is a required edge.
+        investigator = self._investigator()
+        investigator.investigate(
+            "Urgent: verify your account at https://suspicious-login.com/verify or it will be suspended"
+        )
+        graph = investigator.last_graph
+
+        message_entity = next(e for e in graph.entities() if e.type.value == "message")
+        url_entity = next(e for e in graph.entities() if e.type.value == "url")
+
+        message_rels = graph.relationships_for(message_entity.id)
+        self.assertTrue(
+            any(r.relation_type == "mentions" and r.target_entity_id == url_entity.id for r in message_rels),
+            "expected a mentions edge connecting the message to the extracted URL",
+        )
+        url_rels = graph.relationships_for(url_entity.id)
+        self.assertTrue(
+            any(r.relation_type == "has_domain" for r in url_rels),
+            "expected a has_domain edge connecting the extracted URL to its domain",
+        )
+
     def test_pivot_to_ip_and_certificate_creates_graph_relationships(self):
         investigator = self._investigator()
         case, _ = investigator.investigate("suspicious-login.com")
@@ -155,6 +204,20 @@ class TestInvestigatorIntegration(unittest.TestCase):
         investigator.pivot_engine.budget = investigator.budget
         case, _ = investigator.investigate("suspicious-login.com")
         self.assertLessEqual(investigator.budget.entities_investigated, 2)
+
+    def test_collector_that_answers_with_nothing_to_report_is_not_marked_unchecked(self):
+        # A source that ran and legitimately found nothing (e.g. no lookalike
+        # candidate for this domain) is a real, clean check — not a gap.
+        investigator = Investigator(
+            collectors=[FakeDNSCollector(), FakeTLSCollector(), FakeVTCollector(), CleanNothingFoundCollector()],
+            case_memory=self.case_memory,
+            pattern_memory=self.pattern_memory,
+            budget=InvestigationBudget(max_depth=2, max_entities=20, max_external_calls=50),
+            explainer=Explainer(use_llm=False),
+        )
+        case, _ = investigator.investigate("suspicious-login.com")
+        unavailable = case.risk.uncertainty.get("unavailable_sources", [])
+        self.assertNotIn("identity", unavailable)
 
 
 class FakeURLReputationCollector(EvidenceCollector):
