@@ -1,0 +1,42 @@
+# macOS
+.DS_Store
+
+# Python bytecode/cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local runtime/config secrets
+api_keys.txt
+.env
+.env.*
+
+# KRISIS runtime data
+krisis_data/
+
+# Test and coverage artifacts
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Build/distribution
+build/
+dist/
+*.egg-info/
+
+# Type checker/linter caches
+.mypy_cache/
+.ruff_cache/
+
+# Editor/IDE settings
+.idea/
+.vscode/
+
+# Egg-info
+*.egg-info/

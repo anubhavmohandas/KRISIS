@@ -1,0 +1,9 @@
+# Copy this file to api_keys.txt and fill in the keys you have.
+# Environment variables of the same name always take priority over this file
+# (e.g. export VIRUSTOTAL_API_KEY=... / export ANTHROPIC_API_KEY=...).
+#
+# KRISIS works with none of these configured — every collector degrades
+# gracefully and the investigation continues with whatever evidence is
+# actually available (see PROVIDER FAILURE in the design doc).
+
+VIRUSTOTAL_API_KEY=

@@ -1,0 +1,27 @@
+[project]
+name = "krisis"
+version = "0.1.0"
+description = "KRISIS — Knowledge-driven Risk Intelligence & Security Investigation System (CLI-first investigation engine)"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+collectors = [
+    "dnspython>=2.4",
+    "python-whois>=0.9",
+    "ipwhois>=1.2",
+    "pyOpenSSL>=23.0",
+]
+
+[project.scripts]
+krisis = "krisis.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["krisis*"]
