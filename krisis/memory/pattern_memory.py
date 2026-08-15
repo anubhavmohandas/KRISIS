@@ -350,7 +350,13 @@ class PatternMemory:
         false_positives = pattern.get("false_positive_count") or 0
         observed = pattern.get("observed_count") or 0
 
-        if false_positives >= 2 and false_positives > confirmed:
+        # >= rather than a strict >: a pattern that has been wrong as often as it
+        # has been right is a coin flip, not "validated" — it must not carry the
+        # same scoring weight as a spotless record (see PATTERN POISONING
+        # RESISTANCE). The false_positives >= 2 floor is a sample-size guard, not
+        # a leniency toward ties: one lone false positive against one lone
+        # confirmation is too little data to deprecate on either count.
+        if false_positives >= 2 and false_positives >= confirmed:
             return "deprecated"
         if confirmed >= 3 and false_positives == 0:
             return "trusted"

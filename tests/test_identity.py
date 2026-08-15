@@ -94,6 +94,21 @@ class TestCandidateDerivation(unittest.TestCase):
         derived = [c.value for c in candidates("glorptech-login.com")]
         self.assertIn(REAL, derived)
 
+    def test_decoration_wording_with_no_separator_is_also_stripped(self):
+        """Concatenated brand+decoration ("paypallogin.com", "accountpaypal.com")
+        is at least as common a phishing naming pattern as the hyphenated form,
+        and must not be invisible to derivation just because there is no '-'."""
+        self.assertIn(REAL, [c.value for c in candidates("glorptechlogin.com")])
+        self.assertIn(REAL, [c.value for c in candidates("accountglorptech.com")])
+        self.assertIn(REAL, [c.value for c in candidates("glorptechsecure.com")])
+
+    def test_a_short_generic_word_does_not_match_unseparated(self):
+        """'id'/'log'/'pay' are real decoration tokens, but matching them inside
+        an ordinary word by coincidence (no separator to anchor the split) would
+        manufacture impersonation candidates out of unrelated domains."""
+        self.assertEqual(candidates("rapid.com"), [])
+        self.assertEqual(candidates("display.com"), [])
+
     def test_an_ordinary_compound_name_is_not_treated_as_decoration(self):
         """Delete the decoration-lexicon test in _core_tokens and 'my-company.com'
         becomes an impersonation of 'company.com', which is just a hostname."""

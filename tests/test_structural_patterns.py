@@ -212,6 +212,24 @@ class TestStructuralPoisoningResistance(StructuralMatchingTest):
             "a discredited shape must not keep matching",
         )
 
+    def test_a_shape_wrong_as_often_as_it_is_right_is_not_validated(self):
+        """A pattern confirmed malicious twice and false-positive twice is a coin
+        flip, not intelligence — it must not carry the same scoring weight
+        ('validated') as a pattern that has never been wrong."""
+        cases = []
+        for i in range(4):
+            case = self._sighting(f"mixed{i}.example")
+            cases.append(case)
+        for case in cases[:2]:
+            self.case_memory.set_outcome(case.id, "confirmed_malicious")
+        for case in cases[2:]:
+            self.case_memory.set_outcome(case.id, "false_positive")
+
+        self.assertEqual(
+            self.pattern_memory.list_patterns()[0]["stage"], "deprecated",
+            "a 2-confirmed / 2-false-positive record was trusted as 'validated'",
+        )
+
     def test_generic_structure_does_not_match_even_a_trusted_shape(self):
         """The dangerous case: once a shape *is* trusted, the only thing standing
         between it and every ordinary domain is the similarity floor. A site whose

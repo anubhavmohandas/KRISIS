@@ -152,19 +152,36 @@ def label_similarity(a: str, b: str) -> float:
 
 
 def _core_tokens(name: str) -> list[str]:
-    """Identity-bearing tokens of a decorated label: 'paypal' from 'paypal-login'.
+    """Identity-bearing tokens of a decorated label: 'paypal' from 'paypal-login'
+    or from the unseparated 'paypallogin'.
 
-    Only fires when at least one *other* token is a known decoration word. Without
-    that test, 'my-company.com' would be read as imitating 'company.com', which is
-    an ordinary hostname, not an impersonation.
+    Only fires when a known decoration word is actually present: as its own
+    hyphen/underscore token, or — no separator at all — anchored to one edge of
+    the label. Without that test, 'my-company.com' would be read as imitating
+    'company.com', which is an ordinary hostname, not an impersonation.
     """
     tokens = [t for t in name.replace("_", "-").split("-") if t]
-    if len(tokens) < 2:
-        return []
     decorations = decoration_tokens()
-    if not any(t in decorations for t in tokens):
-        return []
-    return [t for t in tokens if t not in decorations and len(t) >= MIN_TOKEN_LENGTH]
+    if len(tokens) >= 2:
+        if not any(t in decorations for t in tokens):
+            return []
+        return [t for t in tokens if t not in decorations and len(t) >= MIN_TOKEN_LENGTH]
+
+    # No separator at all ("paypallogin", "accountpaypal", "netflixbilling") is
+    # at least as common a phishing naming pattern as the hyphenated form, and
+    # was previously invisible to this function entirely. Only decoration words
+    # of at least MIN_TOKEN_LENGTH are tried here, so a short/generic token
+    # ("id", "log", "pay") cannot match inside an ordinary word by coincidence.
+    label = tokens[0] if tokens else ""
+    found: list[str] = []
+    for word in decorations:
+        if len(word) < MIN_TOKEN_LENGTH:
+            continue
+        if label.startswith(word) and len(label) - len(word) >= MIN_TOKEN_LENGTH:
+            found.append(label[len(word):])
+        elif label.endswith(word) and len(label) - len(word) >= MIN_TOKEN_LENGTH:
+            found.append(label[: -len(word)])
+    return found
 
 
 def candidates(host: str, references: set[str] | None = None) -> list[LookalikeCandidate]:
