@@ -94,6 +94,11 @@ class PivotEngine:
     def generate(self, entity: Entity, evidence_items: list[Evidence]) -> list[Pivot]:
         """Given newly collected evidence about `entity`, produce scored candidate pivots."""
         candidates: list[Pivot] = []
+        # Collected alongside the other evidence for this entity, so the commodity
+        # test can use it without the pivot engine reaching into a collector.
+        registrar_domain = next(
+            (str(ev.value) for ev in evidence_items if ev.signal == "registrar_domain"), ""
+        )
         for ev in evidence_items:
             rule = PIVOT_RULES.get(ev.signal)
             if not rule:
@@ -113,7 +118,7 @@ class PivotEngine:
                     source_evidence_id=ev.id,
                     depth=entity.depth + 1,
                 )
-                self._apply_commodity_penalty(entity, pivot)
+                self._apply_commodity_penalty(entity, pivot, registrar_domain)
                 candidates.append(pivot)
         candidates.sort(key=lambda p: p.priority, reverse=True)
         return candidates
@@ -127,7 +132,9 @@ class PivotEngine:
             score += 0.1
         return max(0.0, min(1.0, score))
 
-    def _apply_commodity_penalty(self, source: Entity, pivot: Pivot) -> None:
+    def _apply_commodity_penalty(
+        self, source: Entity, pivot: Pivot, registrar_domain: str = ""
+    ) -> None:
         """Down-weight pivots into infrastructure the target merely rents, and flag them
         so nothing downstream mistakes them for a distinguishing relationship.
 
@@ -145,6 +152,25 @@ class PivotEngine:
             reasons.append(
                 f"third-party {pivot.relation_type.replace('_', ' ')} outside "
                 f"{source.value}'s own domain"
+            )
+
+        # A registration contact under the registrar's *own* domain is that registrar's
+        # role mailbox, attached to every domain it sells — github.com and google.com
+        # both publish abusecomplaints@markmonitor.com. Clustering on it groups
+        # organizations by who sold them the domain, which is not a lead.
+        #
+        # Deliberately narrow: a registrant address anywhere else stays a full-strength
+        # pivot, because a mailbox reused across several suspicious registrations is
+        # one of the strongest links WHOIS can give.
+        if (
+            registrar_domain
+            and pivot.entity_type == EntityType.EMAIL
+            and "@" in pivot.entity_value
+            and same_organization(pivot.entity_value.rsplit("@", 1)[1], registrar_domain)
+        ):
+            reasons.append(
+                f"registrar role mailbox at {registrar_domain}, published for every "
+                f"domain that registrar handles"
             )
 
         if self.case_count_lookup:

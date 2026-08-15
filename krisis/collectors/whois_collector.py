@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from ..core.indicators import registrable_domain
 from ..core.models import Entity, Evidence, Independence, Polarity
 from .base import CollectorResult, EvidenceCollector
 
@@ -23,6 +24,26 @@ def _first(value: Any) -> Any:
     if isinstance(value, (list, tuple)) and value:
         return value[0]
     return value
+
+
+def _registrar_domain(record: Any) -> str:
+    """The registrar's registrable domain, from whichever field the registry filled in.
+
+    Returns "" when the record identifies the registrar only by company name, since
+    a name cannot be compared against an email domain without guessing.
+    """
+    for field in ("registrar_url", "whois_server"):
+        raw = _first(record.get(field))
+        if not raw:
+            continue
+        host = str(raw).strip()
+        if "//" in host:
+            host = host.split("//", 1)[1]
+        host = host.split("/", 1)[0].strip()
+        domain = registrable_domain(host)
+        if domain:
+            return domain
+    return ""
 
 
 class WHOISCollector(EvidenceCollector):
@@ -137,6 +158,26 @@ class WHOISCollector(EvidenceCollector):
                     confidence=0.6,
                     independence=Independence.INDEPENDENT,
                     provenance="domain registrar",
+                )
+            )
+
+        # The registrar's own domain, derived from whichever contact field the
+        # registry returned. This is what lets the pivot engine tell a registrar's
+        # role mailbox (abuse@, whoisrequest@ — attached to every domain it sells)
+        # from an actual registrant contact, which is a genuine lead.
+        registrar_domain = _registrar_domain(record)
+        if registrar_domain:
+            evidence.append(
+                Evidence(
+                    source=self.name,
+                    entity_id=entity.id,
+                    signal="registrar_domain",
+                    value=registrar_domain,
+                    evidence_type="registration",
+                    polarity=Polarity.NEUTRAL,
+                    confidence=0.6,
+                    independence=Independence.DERIVED,
+                    provenance=f"registrar's own domain, derived from the WHOIS record for {entity.value}",
                 )
             )
 

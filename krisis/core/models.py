@@ -287,7 +287,7 @@ class Case:
     risk: Optional[RiskAssessment] = None
     explanation: str = ""
     recommendation: str = ""
-    outcome: Optional[str] = None    # confirmed_malicious | false_positive | unresolved
+    outcome: Optional[str] = None    # an Outcome value, or None while never validated
     provider_failures: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:

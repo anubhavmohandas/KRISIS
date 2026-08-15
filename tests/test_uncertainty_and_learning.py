@@ -22,6 +22,7 @@ from krisis.core.models import (
     Entity,
     EntityType,
     Evidence,
+    Outcome,
     Polarity,
     RiskCategory,
 )
@@ -238,6 +239,38 @@ class TestMemoryPoisoningResistance(unittest.TestCase):
         self.case_memory.save(case)
         self.case_memory.set_outcome(case.id, "confirmed_malicious")
         self.assertEqual(self.case_memory.get(case.id)["outcome"], "confirmed_malicious")
+
+
+class TestEveryOutcomeIsRecordable(unittest.TestCase):
+    """The CLI is the only way a human validates a case, so an outcome the CLI
+    cannot express is an outcome the learning loop can never receive.
+
+    `confirmed_benign` is the one that matters most: it is the sole outcome that
+    drives OUTCOME_TRUST to 0.0 and stops a clean case from raising future risk.
+    """
+
+    def test_cli_offers_exactly_the_outcome_enum(self):
+        from click.types import Choice
+
+        from krisis.cli import outcome as outcome_cmd
+
+        choices = next(
+            p.type.choices for p in outcome_cmd.params if isinstance(getattr(p, "type", None), Choice)
+        )
+        self.assertEqual(set(choices), {o.value for o in Outcome})
+
+    def test_cli_offers_no_outcome_the_engines_cannot_interpret(self):
+        """A value outside the enum silently reaches OUTCOME_TRUST.get() and falls
+        back to the 'unknown' weighting, which is not what the operator recorded."""
+        from click.types import Choice
+
+        from krisis.cli import outcome as outcome_cmd
+
+        choices = next(
+            p.type.choices for p in outcome_cmd.params if isinstance(getattr(p, "type", None), Choice)
+        )
+        for value in choices:
+            Outcome(value)  # raises ValueError if the CLI can emit an unmodelled outcome
 
 
 if __name__ == "__main__":

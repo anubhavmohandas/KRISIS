@@ -25,7 +25,7 @@ import click
 from . import credentials
 from .config import default_collectors
 from .core.investigator import Investigator
-from .core.models import RiskCategory
+from .core.models import Outcome, RiskCategory
 from .memory.case_memory import CaseMemory
 from .memory.pattern_memory import PatternMemory
 from .memory.storage import DEFAULT_DB_PATH, Storage
@@ -349,7 +349,7 @@ def cases(db_path, limit):
 
 @cli.command()
 @click.argument("case_id")
-@click.argument("outcome", type=click.Choice(["confirmed_malicious", "false_positive", "unresolved"]))
+@click.argument("outcome", type=click.Choice([o.value for o in Outcome]))
 @click.option("--db", "db_path", default=DEFAULT_DB_PATH, show_default=True)
 def outcome(case_id, outcome, db_path):
     """Record the real-world outcome of a case, closing the learning loop."""

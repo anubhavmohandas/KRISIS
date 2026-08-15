@@ -31,5 +31,6 @@ class CaseMemory:
         return self.storage.list_cases(limit=limit)
 
     def set_outcome(self, case_id: str, outcome: str) -> None:
-        """outcome: 'confirmed_malicious' | 'false_positive' | 'unresolved'."""
+        """outcome: any core.models.Outcome value. Only human-confirmed ones move
+        pattern strength — see PatternMemory.apply_outcome."""
         self.pattern_memory.apply_outcome(case_id, outcome)

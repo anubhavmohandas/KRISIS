@@ -210,5 +210,116 @@ class TestCommodityInfraDoesNotPoisonMemory(unittest.TestCase):
         self.assertTrue(matches, "a real shared-IP relationship should still be reported")
 
 
+def _registrant_email_evidence(entity_id, value):
+    return Evidence(source="whois", entity_id=entity_id, signal="registrant_email",
+                    value=value, evidence_type="registration", confidence=0.7)
+
+
+def _registrar_domain_evidence(entity_id, value):
+    return Evidence(source="whois", entity_id=entity_id, signal="registrar_domain",
+                    value=value, evidence_type="registration", confidence=0.6)
+
+
+class TestRegistrarRoleMailbox(unittest.TestCase):
+    """A registrar's own contact address is published for every domain it sells.
+
+    Observed live: github.com and google.com both return
+    abusecomplaints@markmonitor.com. Indicator memory weights `email` at 0.4 —
+    second only to certificates — so treating it as distinguishing clusters two
+    unrelated organizations by nothing more than who sold them the domain.
+    """
+
+    def setUp(self):
+        self.engine = PivotEngine(InvestigationBudget())
+        self.seed = Entity(value="github.com", type=EntityType.DOMAIN, depth=0)
+
+    def test_registrar_mailbox_is_flagged_and_downweighted(self):
+        pivots = self.engine.generate(self.seed, [
+            _registrant_email_evidence(self.seed.id, "abusecomplaints@markmonitor.com"),
+            _registrar_domain_evidence(self.seed.id, "markmonitor.com"),
+        ])
+        email_pivot = next(p for p in pivots if p.entity_type == EntityType.EMAIL)
+        self.assertTrue(email_pivot.shared_infrastructure)
+        self.assertIn("registrar role mailbox", email_pivot.reason)
+        self.assertLess(email_pivot.priority, 0.2)
+
+    def test_registrant_mailbox_elsewhere_keeps_full_priority(self):
+        """The fix must stay narrow: a mailbox reused across suspicious registrations
+        is one of the strongest links WHOIS offers, and must not be suppressed."""
+        pivots = self.engine.generate(self.seed, [
+            _registrant_email_evidence(self.seed.id, "attacker@protonmail.com"),
+            _registrar_domain_evidence(self.seed.id, "namecheap.com"),
+        ])
+        email_pivot = next(p for p in pivots if p.entity_type == EntityType.EMAIL)
+        self.assertFalse(email_pivot.shared_infrastructure)
+        self.assertGreater(email_pivot.priority, 0.2)
+        self.assertEqual(
+            self.engine.accept_or_reject(email_pivot, current_depth_count=0).status, "accepted"
+        )
+
+    def test_subdomain_of_registrar_still_counts_as_the_registrar(self):
+        pivots = self.engine.generate(self.seed, [
+            _registrant_email_evidence(self.seed.id, "abuse@corp.mail.markmonitor.com"),
+            _registrar_domain_evidence(self.seed.id, "markmonitor.com"),
+        ])
+        email_pivot = next(p for p in pivots if p.entity_type == EntityType.EMAIL)
+        self.assertTrue(email_pivot.shared_infrastructure)
+
+    def test_missing_registrar_domain_does_not_penalize(self):
+        """Registries that name the registrar only by company name give nothing to
+        compare against; guessing would suppress real leads."""
+        pivots = self.engine.generate(
+            self.seed, [_registrant_email_evidence(self.seed.id, "abusecomplaints@markmonitor.com")]
+        )
+        email_pivot = next(p for p in pivots if p.entity_type == EntityType.EMAIL)
+        self.assertFalse(email_pivot.shared_infrastructure)
+
+    def test_unrelated_orgs_sharing_a_registrar_mailbox_do_not_cluster(self):
+        """End-to-end: the real github.com / google.com collision must not become
+        a historical infrastructure match."""
+        db = os.path.join(tempfile.mkdtemp(), "registrar.db")
+        storage = Storage(db)
+        pattern_memory = PatternMemory(storage)
+        case_memory = CaseMemory(storage, pattern_memory)
+
+        prior = Case(seed="google.com", seed_type=EntityType.DOMAIN)
+        for entity in [
+            Entity(value="abusecomplaints@markmonitor.com", type=EntityType.EMAIL,
+                   depth=1, shared_infrastructure=True),
+            Entity(value="142.250.180.14", type=EntityType.IP, depth=1),
+        ]:
+            prior.entities[entity.id] = entity
+        case_memory.save(prior)
+
+        graph = EntityGraph()
+        graph.add_entity(Entity(value="github.com", type=EntityType.DOMAIN, depth=0))
+        graph.add_entity(Entity(value="abusecomplaints@markmonitor.com", type=EntityType.EMAIL,
+                                depth=1, shared_infrastructure=True))
+
+        matches = pattern_memory.find_similar(graph, [], exclude_seed="github.com")
+        self.assertEqual(matches, [], f"unrelated orgs clustered by registrar mailbox: {matches}")
+
+
+class TestRegistrarDomainDerivation(unittest.TestCase):
+    def test_derives_from_registrar_url(self):
+        from krisis.collectors.whois_collector import _registrar_domain
+
+        self.assertEqual(
+            _registrar_domain({"registrar_url": "http://www.markmonitor.com"}), "markmonitor.com"
+        )
+
+    def test_falls_back_to_whois_server(self):
+        from krisis.collectors.whois_collector import _registrar_domain
+
+        self.assertEqual(
+            _registrar_domain({"whois_server": "whois.namecheap.com"}), "namecheap.com"
+        )
+
+    def test_company_name_only_yields_nothing_to_compare(self):
+        from krisis.collectors.whois_collector import _registrar_domain
+
+        self.assertEqual(_registrar_domain({"registrar": "MarkMonitor, Inc."}), "")
+
+
 if __name__ == "__main__":
     unittest.main()

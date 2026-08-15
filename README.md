@@ -75,9 +75,14 @@ krisis investigate message.txt --file             # mine a message body for URLs
 krisis investigate <sha256> --hash                # investigate a file hash
 
 krisis cases                                      # list stored investigations
-krisis outcome <case_id> confirmed_malicious       # close the learning loop
-krisis outcome <case_id> false_positive
+krisis outcome <case_id> confirmed_malicious      # close the learning loop
+krisis outcome <case_id> confirmed_benign         # the only outcome that neutralises future risk
 ```
+
+`outcome` accepts every state the engines model: `confirmed_malicious`,
+`confirmed_benign`, `false_positive`, `false_negative`, `inconclusive`,
+`unknown`. Only human-confirmed outcomes move pattern strength — `inconclusive`
+and `unknown` deliberately change nothing.
 
 Budget flags (`--max-depth`, `--max-entities`, `--max-external-calls`) prevent
 graph explosion — see `krisis/core/pivot_engine.py::InvestigationBudget`.
@@ -168,6 +173,19 @@ appears across ≥3 unrelated prior artifacts — catches vendors the naming doe
 reveal). Flagged entities are deprioritised as pivots, propagate the flag to
 anything discovered through them, and are excluded from indicator memory and
 pattern matching. Genuine shared hosting still matches normally.
+
+The same rule covers WHOIS registration contacts. `github.com` and `google.com`
+both publish `abusecomplaints@markmonitor.com` — their registrar's role mailbox,
+attached to every domain it sells. Because indicator memory weights `email` at
+0.4 (second only to certificates), treating it as distinguishing reported those
+two as a 44% infrastructure overlap. A registration contact is therefore flagged
+commodity when its domain matches the registrar's own domain, derived at runtime
+from the `registrar_url` / `whois_server` fields in the same WHOIS record.
+
+The test is deliberately narrow: a registrant address anywhere *else* keeps full
+pivot priority, because one mailbox reused across several suspicious
+registrations is among the strongest links WHOIS can provide. Both directions
+are mutation-tested in `tests/test_commodity_infrastructure.py`.
 
 ### Pattern lifecycle
 
