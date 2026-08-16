@@ -19,6 +19,9 @@ api_keys.txt
 # KRISIS runtime data
 krisis_data/
 
+# Generated PDF case reports (krisis show <id> --pdf default output)
+reports/
+
 # Test and coverage artifacts
 .pytest_cache/
 .coverage

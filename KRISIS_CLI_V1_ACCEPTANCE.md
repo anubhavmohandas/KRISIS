@@ -31,12 +31,16 @@ INPUT  -> indicator extraction (domain / IP / hash / URL / message)
        -> Recommendation
        -> Explanation (template, or optional Nemotron translation)
        -> Storage (SQLite case + indicator/pattern memory)
+       -> (on demand, replaying storage only) CLI text / --json / --pdf
 ```
 
 Every stage after collection operates only on structured data produced by the
 stage before it. The CLI (`krisis/cli.py`) is a thin renderer over
 `krisis.core` / `krisis.collectors` / `krisis.memory` / `krisis.ai` — it
-performs no investigation logic itself.
+performs no investigation logic itself. `krisis/pdf_report.py` is a third
+renderer of the same kind, alongside the CLI text renderer and `--json`: it
+reads a stored case back and formats it, and — like both of those — never
+re-enters the pipeline above (see §14, Case Report Export).
 
 ## 4. Investigation workflow
 
@@ -110,7 +114,13 @@ relationships (`resolves_to`, `secured_by`, `registered_by`, `looks_like`,
 `--show-graph` renders it as ASCII with entity type, value, and the
 relationship that connects it to its parent — both on a live `investigate`
 run and on a stored-case `show --show-graph` replay, with identical
-structure between the two.
+structure between the two. `EntityGraph.to_image()` renders the same stored
+structure as an actual node-link diagram (matplotlib: boxes, labeled
+arrows, a per-entity-type color legend) rather than an indented tree — used
+by the PDF case report's Investigation Graph section (§14); it raises
+`RuntimeError` if matplotlib isn't installed, which the PDF renderer catches
+and falls back to a text-tree rendering for, so `--pdf` never hard-depends
+on the graphing library being present.
 
 ## 8. Historical-memory model
 
@@ -199,6 +209,8 @@ argument-parsing error. Commands: `investigate`, `show`, `cases`, `setup`,
 `investigate` additionally has `--show-trace` (a live-execution artifact,
 not persisted, so it is not part of replay) and collection-budget flags
 (`--max-depth`, `--max-entities`, `--max-external-calls`, `--no-prompt`).
+`show` additionally has `--pdf` (export the stored case as a PDF report;
+see §14) and `--output <path>` (override the default `./reports/<id>.pdf`).
 
 Top-level help discoverability: `krisis` / `krisis --help` used to list only
 the five commands, so finding `--show-graph` or `--explain` meant a second
@@ -257,13 +269,115 @@ acceptance pass, not a fixture. `krisis show case_aedcd6da2a1e` (and its
 `--explain`/`--json` variants) reproduced identical conclusions from
 storage, confirmed to issue zero network calls during replay.
 
-## 14. Validation summary
+## 14. Case Report Export
+
+A completed investigation can be exported as a professional PDF case report
+without rerunning it:
+
+```
+krisis show <case_id> --pdf [--output <path>]
+```
+
+Default output path is deterministic: `./reports/<case_id>.pdf` (directory
+created if needed). `--output` overrides it. Example:
+
+```
+$ krisis show case_06c38858bbdd --pdf
+[+] Case report exported:
+    reports/case_06c38858bbdd.pdf
+```
+
+**Architecture.** `krisis/pdf_report.py` renders directly from the same
+stored-case dict `Storage.get_case()` / `Case.to_dict()` already produce —
+the exact shape the CLI text renderer and `--json` consume. It is a third
+renderer over that one report model, not a second, independently computed
+summary:
+
+```
+Stored Case
+    |
+InvestigationReport (the stored case dict itself)
+    +-- CLI renderer      (cli.py _render_*)
+    +-- JSON renderer     (--json)
+    +-- PDF renderer      (pdf_report.py, this feature)
+```
+
+No new risk calculation, no new correlation logic, no new provider calls —
+`pdf_report.py` imports only `krisis.core.graph.EntityGraph` (to replay the
+stored graph, same as `show --show-graph`) and `krisis.core.risk.
+historical_match_label` (the one place historical-match phrasing is decided,
+also the source `_render_case`/`_render_patterns` already call). It never
+imports `requests`.
+
+**Stored-case-only / no-network guarantee.** PDF generation reads the case
+dict passed to it and writes one file; it does not call any collector,
+provider, or the AI explanation layer. Verified three ways: (1) `requests.
+get` and `requests.post` are both patched to raise `AssertionError` around
+every `show --pdf` CLI test — if a network call happened, the test would
+fail with that assertion, not a generation error; (2) a live case (`krisis
+investigate wikipedia.org`, `case_06c38858bbdd`) had its `provider_events`
+row count read from SQLite before and after `krisis show <id> --pdf` —
+identical (735 before, 735 after); (3) `pdf_report.generate_pdf()` is proven
+not to mutate the case dict it's given (`test_generation_does_not_mutate_the_
+case_dict`, a `copy.deepcopy` equality check before/after).
+
+**PDF contents.** Cover page (case ID, target, type, timestamp, verdict,
+score, confidence in a colored box matching the CLI's risk-category
+colors); Executive Summary; Primary Evidence (supporting) and Counter-
+Evidence tables — signal, entity, observed value, confidence, source,
+provenance, derived from `case["evidence"]` filtered by polarity, the same
+derivation `_render_case` already uses for counter-evidence, extended to
+supporting evidence; Evidence Coverage (collected / cached / reused /
+skipped / rate-limited / unavailable, explicitly stated as non-equivalent);
+Provider Usage table; Investigation Graph — a real node-link diagram
+(`EntityGraph.to_image()`, matplotlib, boxes + labeled arrows + a per-
+entity-type color legend) rendered from the stored graph, with an
+indented-text-tree fallback if matplotlib is not installed; Investigation
+Trace — reconstructed from `pivots`/`provider_skips`/`provider_failures`
+(the actual live per-event trace is a live-execution artifact and, like
+`investigate --show-trace`, is not persisted, so it is explicitly out of
+scope for replay and the report says so rather than pretending to include
+it); Historical Memory using `historical_match_label()` per match — never
+a bare "Historical similarity: N%" — plus a Structural Pattern Learning
+interpretation sentence for matches with no shared indicator; Risk and
+Confidence (score is explicitly labeled not-a-probability); Recommendation;
+an Explanation section labeled "Plain-Language Explanation" when the stored
+case's `explanation_source == "ai"` or "Deterministic Explanation"
+otherwise (see below); Case Metadata (counts only — no keys, no credential
+material, nothing beyond what `to_dict()` already exposes).
+
+**`explanation_source` field.** The stored case previously had no way to
+tell whether `case.explanation` came from the NVIDIA model or the
+deterministic template — both were just `case.explanation: str`. A one-
+field addition (`Case.explanation_source`, set from `Explainer.
+last_source` right after `case.explanation = self.explainer.explain(...)`
+in `investigator.py`) lets the report label the explanation truthfully
+without guessing from whether a key happens to be configured *now*. This
+does not call the AI layer during report generation — it reads what was
+already decided and stored at investigation time.
+
+**Quality.** Cover page, running header/footer with page numbers
+(`Page N / {nb}`), colored section headings, tables with wrapped long
+values (evidence provenance, DNS/certificate strings) via fpdf2's
+`table()`, an em/en-dash and curly-quote-to-ASCII transliteration pass
+(`pdf_report._clean`) so KRISIS's own prose renders correctly under the
+core Helvetica font rather than emitting stray `?` glyphs, and the graph
+diagram fit to the page width with an added page break when needed so nothing overflows a page boundary.
+
+**Dependencies.** `fpdf2` (core, required — the PDF renderer). `matplotlib`
+(optional `report`/`graph` extra — the graph *image*; `to_image()` raises
+`RuntimeError` without it, which the PDF renderer catches and falls back to
+an indented text tree, so `--pdf` still works without it installed).
+`pypdf` (dev-only — PDF report tests read the generated file's text back to
+assert on its content).
+
+## 15. Validation summary
 
 - Working tree inspected before any change; all uncommitted modifications
   (provider-skip/failure split, exact-artifact/infrastructure/structural
   historical semantics, colorized CLI help/output) reviewed and understood
   as coherent in-progress fixes, not reverted.
-- Full pytest and `unittest discover` suites green: 267/267, both runners.
+- Full pytest and `unittest discover` suites green: 286/286, both runners.
 - All CLI help screens (`krisis`, `--help`, and every subcommand's
   `--help`) verified to render useful, non-error output.
 - Live `krisis investigate github.com` run against real collectors and the
@@ -294,19 +408,41 @@ storage, confirmed to issue zero network calls during replay.
   limits, timeouts in `page_collector.py`) confirmed present and untouched.
 - README cross-checked against actual behavior; one real gap found and
   fixed (see below) — no other stale claims found.
+- PDF report export (`krisis show <id> --pdf`) added as a third renderer
+  over the stored case (§14). Verified: generation succeeds from a stored
+  case alone; the default output path is deterministic; `--output`
+  overrides it; the case dict is not mutated by generation (`copy.deepcopy`
+  equality check); zero network calls (both `requests.get`/`requests.post`
+  patched to raise, plus a live before/after `provider_events` row-count
+  check against a real case — 735 before, 735 after); PDF content contains
+  case ID, target, risk category/score/confidence, recommendation,
+  explanation, and evidence table rows sourced from `case["evidence"]`
+  (not merely echoed via `risk.top_contributors`); provider skips and
+  provider failures render under distinct headings, never merged; historical
+  matches render via `historical_match_label()`, never a bare percentage.
+  Live acceptance: `krisis investigate wikipedia.org` -> `case_06c38858bbdd`
+  -> `krisis show case_06c38858bbdd --pdf` -> visually inspected (cover,
+  evidence tables, node-link graph diagram, historical memory, risk section)
+  -> cross-checked against `krisis show` (text) and `--json` for the same
+  case: identical id/seed/risk category/score/confidence across all three
+  surfaces.
 
-## 15. Test count
+## 16. Test count
 
-**267 / 267 passing**, under both `pytest` and `python3 -m unittest discover
+**286 / 286 passing**, under both `pytest` and `python3 -m unittest discover
 -s tests`. This count includes `tests/test_historical_match_semantics.py`
 (10 tests), the extended `test_cli.py` / `test_investigator_integration.py`
-coverage for the provider-skip/failure split, and `TestTopLevelHelp`
-(2 tests) for the top-level help UX pass, all authored in the session that
-produced the working-tree changes this acceptance pass validated.
+coverage for the provider-skip/failure split, `TestTopLevelHelp` (2 tests)
+for the top-level help UX pass, `tests/test_pdf_report.py` (16 tests: PDF
+generation, deterministic default path, no-mutation, no-network, content
+fidelity, explanation-source labeling, provider-skip/failure distinctness,
+historical-match semantics, zero provider events), and 3 new
+`tests/test_graph.py` cases for `EntityGraph.to_image()` (PNG output, empty
+graph, and the no-matplotlib `RuntimeError` fallback path).
 
-## 16. Mutation-testing summary
+## 17. Mutation-testing summary
 
-Three material fixes were mutation-tested during this pass by temporarily
+Material fixes were mutation-tested during this pass by temporarily
 reverting each to its prior (buggy) behavior and confirming the relevant
 test(s) fail, then restoring the original code:
 
@@ -315,15 +451,18 @@ test(s) fail, then restoring the original code:
 | Force `historical_match_label` to never classify `exact_artifact` | 2 tests failed as expected |
 | Revert `pattern_memory.py`'s seed-exclusion from value-based back to `depth == 0` | 1 test failed as expected |
 | Revert `investigator.py`'s skip/failure branch to always report `provider_failures` | 1 test failed as expected |
+| `pdf_report.py`: drop `provider_skips`/`provider_failures` from the Investigation Trace section | `test_pdf_keeps_provider_skips_distinct_from_failures` failed as expected |
+| `pdf_report.py`: replace `historical_match_label(m)` with a generic `f"Historical similarity: {sim:.0%}"` | `test_pdf_historical_match_semantics_are_not_generic` failed as expected |
+| `pdf_report.py`: force `_evidence_rows()` to always return `[]` (evidence dropped from the report) | `test_pdf_evidence_table_reflects_stored_evidence_items` failed as expected — this replaced an initial, weaker mutation test that checked only signal names, which turned out to also be echoed via `risk.top_contributors` and so didn't fail; the strengthened test checks fields (observed value, provenance) that exist *only* in the evidence table |
 
-All three were restored to their working state immediately after
-verification; the full suite was re-run clean (267/267) afterward. This is
-in addition to the project's existing, larger body of mutation-verified
-rules documented in `README.md` (commodity-infrastructure suppression,
-structural-similarity weighting, provider budgeting, identity verification,
-and more).
+All were restored to their working state immediately after verification
+(`git checkout --`, since the pre-mutation state was a clean commit); the
+full suite was re-run clean (286/286) afterward. This is in addition to the
+project's existing, larger body of mutation-verified rules documented in
+`README.md` (commodity-infrastructure suppression, structural-similarity
+weighting, provider budgeting, identity verification, and more).
 
-## 17. Known limitations
+## 18. Known limitations
 
 Carried forward from the current, honest README scope statement — not
 resolved or claimed resolved by this pass:
@@ -349,7 +488,7 @@ resolved or claimed resolved by this pass:
   differences from a forward-looking JSON sketch, not gaps in what is
   actually reported.
 
-## 18. Explicit future work
+## 19. Explicit future work
 
 Deliberately not built in this pass, per the acceptance scope:
 
@@ -363,7 +502,7 @@ Deliberately not built in this pass, per the acceptance scope:
 - A `hypotheses`/`coverage` JSON schema expansion, if a future consumer
   actually needs it as its own field rather than derived from existing ones
 
-## 19. Why KRISIS is not merely a reputation-service wrapper
+## 20. Why KRISIS is not merely a reputation-service wrapper
 
 A reputation wrapper returns one opaque number from one source and stops.
 KRISIS: (1) collects from multiple independent, individually optional
@@ -383,13 +522,18 @@ this pass: `github.com` was investigated using one real VirusTotal call and
 ten correctly-recorded value-gate skips — a plain reputation wrapper would
 either have spent all ten or reported nothing about why it didn't.
 
-## 20. CLI v1 completion statement
+## 21. CLI v1 completion statement
 
 KRISIS CLI v1 — COMPLETE
 
+The CLI can investigate, persist, replay, explain, inspect, and export a
+complete investigation case as a PDF without rerunning external evidence
+collection.
+
 The investigation engine, evidence model, provider planning, graph,
 historical memory, structural reasoning, deterministic risk, case replay,
-JSON interface, CLI UX, and AI explanation boundary have been validated.
+JSON interface, CLI UX, AI explanation boundary, and PDF case report export
+have been validated.
 
 No release-blocking defect remains.
 

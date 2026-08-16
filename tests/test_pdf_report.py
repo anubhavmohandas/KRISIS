@@ -222,6 +222,20 @@ class TestShowPdfCommand(unittest.TestCase):
         self.assertIn("lookalike_domain", text)
         self.assertIn("valid_tls_present", text)
 
+    def test_pdf_evidence_table_reflects_stored_evidence_items(self):
+        """Fields that exist *only* in the evidence table (the observed value and
+        provenance — unlike the signal name, which risk.top_contributors also
+        echoes) — proving the table is built from case['evidence'], not omitted
+        or replaced by a summary that merely reuses the same signal names."""
+        case_id = _stored_case_id(self.db_path)
+        out = os.path.join(self.tmpdir, "case.pdf")
+        self._invoke("show", case_id, "--db", self.db_path, "--pdf", "--output", out)
+        text = " ".join(_extract_text(out).split())
+        self.assertIn("netflix.example", text)  # observed value of the supporting evidence
+        self.assertIn("homoglyph match against known brand", text)  # its provenance
+        self.assertIn("Some CA", text)  # observed value of the counter-evidence
+        self.assertIn("certificate chain validated", text)  # its provenance
+
     def test_pdf_labels_deterministic_explanation_correctly(self):
         case_id = _stored_case_id(self.db_path, explanation_source="deterministic")
         out = os.path.join(self.tmpdir, "case.pdf")

@@ -80,6 +80,8 @@ krisis show <case_id>                             # replay a stored investigatio
 krisis show <case_id> --show-graph                # replay also accepts the same --show-* / --explain / --verbose flags as investigate
 krisis show <case_id> --verbose                   # graph, evidence, pivots, and patterns, from storage — no network calls
 krisis show <case_id> --json                      # ...as the full stored case JSON
+krisis show <case_id> --pdf                       # export the stored case as a PDF case report
+krisis show <case_id> --pdf --output out.pdf      # ...to a custom path (default: ./reports/<case_id>.pdf)
 krisis outcome <case_id> confirmed_malicious      # close the learning loop
 krisis outcome <case_id> confirmed_benign         # the only outcome that neutralises future risk
 ```
@@ -112,6 +114,7 @@ INPUT
   -> recommended action          krisis/core/recommend.py
   -> case storage                krisis/memory/case_memory.py
   -> pattern/knowledge update    krisis/memory/pattern_memory.py + `krisis outcome`
+  -> (on demand) replay/export   krisis/cli.py text+JSON, krisis/pdf_report.py PDF
 ```
 
 `krisis/core/investigator.py::Investigator` is the only place that sequences
@@ -424,7 +427,7 @@ faked investigator). Run:
 python3 -m unittest discover -s tests -v
 ```
 
-265 tests covering: graph dedup/traversal, pivot budget/depth/noisy-fanout
+286 tests covering: graph dedup/traversal, pivot budget/depth/noisy-fanout
 enforcement, evidence polarity/diversity correlation, risk determinism/
 counter-evidence/diminishing-returns, provider-failure handling (never
 silently treated as "clean", and never conflated with a deliberate planner
@@ -482,6 +485,12 @@ docs, not the finished system. Implemented for real, end to end:
 - Template-based explanation (always) + optional Nemotron explanation over an
   OpenAI-compatible endpoint, receiving a summary rather than the raw case
 - Advisory-only recommendation engine
+- PDF case report export (`krisis show <case_id> --pdf`): a third renderer
+  over the same stored case the CLI text and `--json` renderers use — cover
+  page, evidence tables, provider usage, investigation graph (real node-link
+  diagram via matplotlib, text-tree fallback if unavailable), historical
+  memory, risk/recommendation/explanation. Reads stored case state only —
+  zero network calls, zero mutation
 
 Not yet implemented (explicitly out of scope for this pass, see design docs
 §25 and self-critique checklist):
@@ -520,5 +529,6 @@ krisis/
   ai/            explanation layer
   cli.py         click CLI
   config.py      default collector wiring, API key loading
-tests/           265 tests against the real execution path, mutation-verified
+  pdf_report.py  PDF case report renderer (stored case -> PDF, no network)
+tests/           286 tests against the real execution path, mutation-verified
 ```
