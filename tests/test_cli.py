@@ -21,7 +21,9 @@ from unittest import mock
 from click.testing import CliRunner
 
 from krisis.cli import cli
-from krisis.core.models import Case, Coverage, Entity, EntityType, Evidence, Independence, Polarity
+from krisis.core.models import (
+    Case, Coverage, Entity, EntityType, Evidence, Independence, Pivot, Polarity, Relationship,
+)
 from krisis.core.risk import RiskEngine
 from krisis.core.correlation import CorrelationResult
 from krisis.memory.case_memory import CaseMemory
@@ -48,9 +50,20 @@ def _stored_case_id(db_path: str) -> str:
         independence=Independence.INDEPENDENT,
     )
     entity = Entity(value="netflix-login.example", type=EntityType.DOMAIN, id="e1", depth=0)
+    pivot_target = Entity(value="203.0.113.9", type=EntityType.IP, id="e2", depth=1)
     case.entities[entity.id] = entity
+    case.entities[pivot_target.id] = pivot_target
     case.evidence[identity_ev.id] = identity_ev
     case.evidence[tls_ev.id] = tls_ev
+    rel = Relationship(
+        source_entity_id="e1", target_entity_id="e2",
+        relation_type="resolves_to", reason="domain resolves to this IP", id="r1",
+    )
+    case.relationships[rel.id] = rel
+    case.pivots.append(Pivot(
+        entity_value="203.0.113.9", entity_type=EntityType.IP, reason="domain resolves to this IP",
+        priority=0.6, source_entity_id="e1", status="accepted",
+    ))
 
     correlation = CorrelationResult(
         supporting=[identity_ev], contradicting=[tls_ev], evidence_diversity=0.5
@@ -99,6 +112,47 @@ class TestShowCommand(unittest.TestCase):
         data = json.loads(result.stdout)
         self.assertEqual(data["id"], case_id)
         self.assertEqual(data["risk"]["category"], "MEDIUM")
+
+    def test_show_graph_replays_entities_and_relationships(self):
+        # investigate --show-graph prints the graph live; show --show-graph must
+        # reproduce it from storage — same command surface, same information.
+        case_id = _stored_case_id(self.db_path)
+        result = self._invoke("show", case_id, "--db", self.db_path, "--show-graph")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Investigation Graph", result.output)
+        self.assertIn("netflix-login.example", result.output)
+        self.assertIn("203.0.113.9", result.output)
+        self.assertIn("resolves_to", result.output)
+
+    def test_show_evidence_lists_every_evidence_item(self):
+        case_id = _stored_case_id(self.db_path)
+        result = self._invoke("show", case_id, "--db", self.db_path, "--show-evidence")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("--- Evidence ---", result.output)
+        self.assertIn("lookalike_domain", result.output)
+        self.assertIn("valid_tls_present", result.output)
+
+    def test_show_pivots_lists_every_pivot(self):
+        case_id = _stored_case_id(self.db_path)
+        result = self._invoke("show", case_id, "--db", self.db_path, "--show-pivots")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("--- Pivots ---", result.output)
+        self.assertIn("203.0.113.9", result.output)
+        self.assertIn("accepted", result.output)
+
+    def test_show_patterns_reports_none_when_no_match(self):
+        case_id = _stored_case_id(self.db_path)
+        result = self._invoke("show", case_id, "--db", self.db_path, "--show-patterns")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Historical Pattern Matches", result.output)
+        self.assertIn("none", result.output)
+
+    def test_show_verbose_includes_every_section(self):
+        case_id = _stored_case_id(self.db_path)
+        result = self._invoke("show", case_id, "--db", self.db_path, "--verbose")
+        self.assertEqual(result.exit_code, 0)
+        for heading in ("Investigation Graph", "--- Evidence ---", "--- Pivots ---", "Historical Pattern Matches"):
+            self.assertIn(heading, result.output)
 
     def test_show_unknown_case_fails_clearly(self):
         result = self._invoke("show", "case_does_not_exist", "--db", self.db_path)

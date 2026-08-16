@@ -77,6 +77,8 @@ krisis investigate <sha256> --hash                # investigate a file hash
 
 krisis cases                                      # list stored investigations
 krisis show <case_id>                             # replay a stored investigation (risk, evidence, explanation)
+krisis show <case_id> --show-graph                # replay also accepts the same --show-* / --explain / --verbose flags as investigate
+krisis show <case_id> --verbose                   # graph, evidence, pivots, and patterns, from storage — no network calls
 krisis show <case_id> --json                      # ...as the full stored case JSON
 krisis outcome <case_id> confirmed_malicious      # close the learning loop
 krisis outcome <case_id> confirmed_benign         # the only outcome that neutralises future risk
@@ -162,14 +164,16 @@ verdict it didn't earn:
 | Low score with reputation actually checked and clean | `LOW` |
 
 The flagged-but-uncorroborated row exists because of a real run: `malware.wicar.org`
-is flagged by VirusTotal, but one reputation hit does not accumulate enough
-weighted points to leave the LOW band, so KRISIS printed
-`malicious_detection (virustotal)` as its top contributor and, two lines later,
-*"LOW risk. No strong evidence of malicious activity was found."* A reputation
-source is a direct determination about the artifact rather than circumstantial
-evidence, so the thin corroboration keeps the **score** low while the **verdict**
-is barred from claiming safety, with the qualification stated in the output and
-carried into the recommended action.
+is flagged by VirusTotal. A single reputation hit is no longer enough to land in
+the LOW band — the reputation floor (fixed in `070a9b5`) blocks that — so KRISIS
+scores it `MEDIUM 11/100, confidence 62%`, with `malicious_detection (virustotal)`
+as the one supporting contributor and `long_lived_domain` (the domain's multi-year
+registration age) as the only counter-evidence; the `tls` source couldn't be
+reached (certificate hostname mismatch) and is reported as unavailable rather than
+folded into "clean". A reputation source is a direct determination about the
+artifact rather than circumstantial evidence, so a single flagged hit is barred
+from ever reading as LOW, with the qualification stated in the output and carried
+into the recommended action.
 
 Confidence is scaled by coverage separately from the score, so risk, confidence
 and pattern similarity can disagree — which is the point: *"resembles known-bad
@@ -407,7 +411,7 @@ faked investigator). Run:
 python3 -m unittest discover -s tests -v
 ```
 
-172 tests covering: graph dedup/traversal, pivot budget/depth/noisy-fanout
+252 tests covering: graph dedup/traversal, pivot budget/depth/noisy-fanout
 enforcement, evidence polarity/diversity correlation, risk determinism/
 counter-evidence/diminishing-returns, provider-failure handling (never
 silently treated as "clean"), provider-payload normalization, provider
@@ -502,5 +506,5 @@ krisis/
   ai/            explanation layer
   cli.py         click CLI
   config.py      default collector wiring, API key loading
-tests/           118 tests against the real execution path, mutation-verified
+tests/           252 tests against the real execution path, mutation-verified
 ```

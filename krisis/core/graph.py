@@ -108,6 +108,31 @@ class EntityGraph:
             "relationships": [r.to_dict() for r in self._relationships.values()],
         }
 
+    @classmethod
+    def from_dict(cls, data: dict) -> "EntityGraph":
+        """Rebuild a graph from a stored Case dict (same shape as to_dict()).
+
+        Used for case replay (`krisis show --show-graph`), where the graph
+        itself is never persisted separately — only the entities and
+        relationships a live investigation already stores on the Case.
+        """
+        graph = cls()
+        for e in data.get("entities", []):
+            graph.add_entity(Entity(
+                value=e["value"], type=EntityType(e["type"]), id=e["id"],
+                first_seen=e.get("first_seen", ""), depth=e.get("depth", 0),
+                metadata=e.get("metadata") or {},
+                shared_infrastructure=e.get("shared_infrastructure", False),
+            ))
+        for r in data.get("relationships", []):
+            graph.add_relationship(Relationship(
+                source_entity_id=r["source_entity_id"], target_entity_id=r["target_entity_id"],
+                relation_type=r["relation_type"], reason=r["reason"], id=r["id"],
+                evidence_ids=r.get("evidence_ids") or [], weight=r.get("weight", 0.5),
+                created_at=r.get("created_at", ""),
+            ))
+        return graph
+
     def to_ascii(self, root_id: Optional[str] = None, max_lines: int = 200) -> str:
         """Render a simple indented ASCII tree starting from root_id (or any depth-0 entity)."""
         lines: list[str] = []

@@ -6,6 +6,7 @@ KRISIS CLI.
     krisis investigate message.txt --file
     krisis investigate --hash <sha256>
     krisis cases
+    krisis show <case_id> --verbose
     krisis outcome <case_id> confirmed_malicious
 
 The CLI is intentionally thin: it wires config -> Investigator, runs one
@@ -24,6 +25,7 @@ import click
 
 from . import credentials
 from .config import build_planner, default_collectors
+from .core.graph import EntityGraph
 from .core.investigator import Investigator
 from .core.models import Outcome, RiskCategory
 from .core.recommend import INDECISIVE
@@ -270,14 +272,15 @@ def investigate(
     if verbose:
         show_graph = show_evidence = show_pivots = show_patterns = show_trace = True
 
-    _render_case(case)
+    case_dict = case.to_dict()
+    _render_case(case_dict)
 
     if show_evidence:
-        _render_evidence(case)
+        _render_evidence(case_dict)
     if show_pivots:
-        _render_pivots(case)
+        _render_pivots(case_dict)
     if show_patterns:
-        _render_patterns(case)
+        _render_patterns(case.pattern_matches)
     if show_graph and graph is not None:
         _render_graph(graph)
     if show_trace:
@@ -359,14 +362,21 @@ def cases(db_path, limit):
 
 @cli.command()
 @click.argument("case_id")
+@click.option("--show-graph", is_flag=True, help="Print the investigation graph as ASCII.")
+@click.option("--show-evidence", is_flag=True, help="Print all collected evidence.")
+@click.option("--show-pivots", is_flag=True, help="Print every pivot considered, accepted or rejected.")
+@click.option("--show-patterns", is_flag=True, help="Print historical pattern matches.")
+@click.option("--explain", "explain_only", is_flag=True, help="Print only the plain-language explanation.")
+@click.option("--verbose", is_flag=True, help="Show everything (graph, evidence, pivots, patterns).")
 @click.option("--db", "db_path", default=DEFAULT_DB_PATH, show_default=True)
 @click.option("--json", "as_json", is_flag=True, help="Print the full stored case as JSON.")
-def show(case_id, db_path, as_json):
+def show(case_id, show_graph, show_evidence, show_pivots, show_patterns, explain_only, verbose, db_path, as_json):
     """Show a previously stored investigation (see `krisis cases` for ids).
 
     `krisis cases` only ever printed one summary line per case — there was no way
     to look back at what an old investigation actually found. This replays it from
-    what was stored: risk, evidence, provider usage, and the explanation.
+    what was stored: risk, evidence, provider usage, graph, and the explanation.
+    It never re-runs collection — everything shown comes from the stored case.
     """
     data = Storage(db_path).get_case(case_id)
     if not data:
@@ -375,7 +385,34 @@ def show(case_id, db_path, as_json):
     if as_json:
         click.echo(json.dumps(data, indent=2, default=str))
         return
-    _render_stored_case(data)
+    if explain_only:
+        click.echo(data.get("explanation", ""))
+        return
+
+    if verbose:
+        show_graph = show_evidence = show_pivots = show_patterns = True
+
+    _render_case(data)
+    if show_evidence:
+        _render_evidence(data)
+    if show_pivots:
+        _render_pivots(data)
+    if show_patterns:
+        _render_patterns(data.get("pattern_matches") or [])
+    if show_graph:
+        graph = EntityGraph.from_dict(data)
+        if graph.entity_count():
+            _render_graph(graph)
+
+    _render_provider_usage(data.get("provider_usage") or {})
+
+    failures = data.get("provider_failures") or []
+    if failures:
+        click.secho(f"\n[!] {len(failures)} evidence source(s) unavailable:", fg="yellow")
+        for note in failures:
+            click.echo(f"    - {note}")
+
+    click.secho(f"\n[case: {data['id']}, seed: {data['seed']}]", fg="bright_black")
 
 
 @cli.command()
@@ -395,90 +432,97 @@ def outcome(case_id, outcome, db_path):
 
 
 # -- rendering -----------------------------------------------------------------
+#
+# All rendering below reads a Case in its to_dict() shape (plain dicts/strings,
+# enums as .value). `investigate` builds that shape from the case it just produced
+# and `show` reads it back from storage — one renderer, so the two commands cannot
+# drift apart the way _render_case/_render_stored_case once did.
 
-def _render_case(case) -> None:
-    risk = case.risk
-    if risk is None:
-        click.secho("[-] Investigation did not produce a risk assessment.", fg="red")
+def _render_case(data: dict) -> None:
+    risk = data.get("risk") or {}
+    if not risk:
+        click.secho("[-] No risk assessment available for this case.", fg="red")
         return
 
-    color = _CATEGORY_COLOR.get(risk.category, "white")
+    color = _CATEGORY_COLOR.get(RiskCategory(risk["category"]), "white")
     click.echo()
-    click.secho(f"Risk: {risk.category.value}", fg=color, bold=True, nl=False)
-    click.echo(f"   Score: {risk.score}/100   Confidence: {risk.confidence:.0%}")
+    click.secho(f"Risk: {risk['category']}", fg=color, bold=True, nl=False)
+    click.echo(f"   Score: {risk['score']}/100   Confidence: {risk['confidence']:.0%}")
 
     # An indecisive verdict has to explain itself, or a reader will round it down
     # to "probably fine" — which is the exact failure this state exists to prevent.
-    if risk.uncertainty:
-        if risk.uncertainty.get("reason"):
-            label = (
-                "Why this is not a verdict"
-                if risk.category in INDECISIVE else "Why this verdict was qualified"
-            )
-            click.secho(f"\n{label}: {risk.uncertainty['reason']}.", fg=color)
-        if risk.uncertainty.get("unavailable_sources"):
-            click.echo(
-                "Not checked: " + ", ".join(risk.uncertainty["unavailable_sources"])
-                + "  (absence of data from these is not evidence of safety)"
-            )
+    uncertainty = risk.get("uncertainty") or {}
+    if uncertainty.get("reason"):
+        label = "Why this is not a verdict" if risk["category"] in (
+            c.value for c in INDECISIVE
+        ) else "Why this verdict was qualified"
+        click.secho(f"\n{label}: {uncertainty['reason']}.", fg=color)
+    if uncertainty.get("unavailable_sources"):
+        click.echo(
+            "Not checked: " + ", ".join(uncertainty["unavailable_sources"])
+            + "  (absence of data from these is not evidence of safety)"
+        )
 
-    if risk.top_contributors:
+    if risk.get("top_contributors"):
         click.echo("\nPrimary contributors:")
-        for c in risk.top_contributors:
+        for c in risk["top_contributors"]:
             click.echo(f"  - {c}")
 
-    if risk.contradicting:
+    entities_by_id = {e["id"]: e for e in data.get("entities", [])}
+    contradicting = [ev for ev in data.get("evidence", []) if ev.get("polarity") == "contradicts_threat"]
+    if contradicting:
         click.echo("\nCounter-evidence:")
-        for c in risk.contradicting[:5]:
-            entity = case.entities.get(c.get("entity_id"))
+        for c in contradicting[:5]:
+            entity = entities_by_id.get(c.get("entity_id"))
             # Name the entity: several extracted indicators often produce the same
             # signal, and identical unattributed lines read as duplicated evidence.
-            subject = f" [{entity.value}]" if entity else ""
+            subject = f" [{entity['value']}]" if entity else ""
             click.echo(f"  - {c['signal']}{subject}: {c['value']}")
         # Some of the above is listed for completeness but was excluded from the
         # score arithmetic (see risk._discount_narrow_contradictions) — without this,
         # it reads as evidence that offsets the finding above it, when it does not.
-        for note in risk.uncertainty.get("discounted_counter_evidence") or []:
+        for note in uncertainty.get("discounted_counter_evidence") or []:
             click.secho(f"    note: {note}", fg="bright_black")
 
-    if risk.historical_similarity:
-        hs = risk.historical_similarity
+    if risk.get("historical_similarity"):
+        hs = risk["historical_similarity"]
         click.echo(f"\nHistorical similarity: {hs['similarity']:.0%} to {hs['pattern_name']}")
 
-    click.echo(f"\n{case.explanation}")
+    click.echo(f"\n{data.get('explanation', '')}")
     click.echo()
     click.secho("Recommended action:", bold=True)
-    click.echo(f"  {case.recommendation}")
+    click.echo(f"  {data.get('recommendation', '')}")
 
 
-def _render_evidence(case) -> None:
+def _render_evidence(data: dict) -> None:
+    entities_by_id = {e["id"]: e for e in data.get("entities", [])}
     click.echo("\n--- Evidence ---")
-    for ev in case.evidence.values():
-        entity = case.entities.get(ev.entity_id)
-        target = entity.value if entity else ev.entity_id
+    for ev in data.get("evidence", []):
+        entity = entities_by_id.get(ev["entity_id"])
+        target = entity["value"] if entity else ev["entity_id"]
         click.echo(
-            f"  [{ev.polarity.value:<20}] {ev.source:<12} {ev.signal:<28} "
-            f"{target:<30} = {ev.value} (conf {ev.confidence:.2f}, {ev.independence.value})"
+            f"  [{ev['polarity']:<20}] {ev['source']:<12} {ev['signal']:<28} "
+            f"{target:<30} = {ev['value']} (conf {ev['confidence']:.2f}, {ev['independence']})"
         )
 
 
-def _render_pivots(case) -> None:
+def _render_pivots(data: dict) -> None:
     click.echo("\n--- Pivots ---")
-    for p in case.pivots:
-        marker = "+" if p.status == "accepted" else "-"
+    for p in data.get("pivots", []):
+        marker = "+" if p["status"] == "accepted" else "-"
         click.echo(
-            f"  [{marker}] {p.entity_type.value:<12} {p.entity_value:<30} "
-            f"priority={p.priority:.2f} status={p.status}"
-            + (f" ({p.rejection_reason})" if p.rejection_reason else f" ({p.reason})")
+            f"  [{marker}] {p['entity_type']:<12} {p['entity_value']:<30} "
+            f"priority={p['priority']:.2f} status={p['status']}"
+            + (f" ({p['rejection_reason']})" if p.get("rejection_reason") else f" ({p['reason']})")
         )
 
 
-def _render_patterns(case) -> None:
+def _render_patterns(pattern_matches: list) -> None:
     click.echo("\n--- Historical Pattern Matches ---")
-    if not case.pattern_matches:
+    if not pattern_matches:
         click.echo("  none")
         return
-    for m in case.pattern_matches:
+    for m in pattern_matches:
         click.echo(
             f"  overall {m['similarity']:.0%}  "
             f"(indicator {m.get('indicator_similarity', 0):.0%} / "
@@ -525,68 +569,6 @@ def _render_trace(trace) -> None:
     for i, step in enumerate(trace.steps, 1):
         stage = step.pop("stage")
         click.echo(f"  {i:>3}. {stage:<22} {step}")
-
-
-def _render_stored_case(data: dict) -> None:
-    """The `krisis show` counterpart to _render_case: same layout, but reading
-    a case back out of storage — plain dicts (Case.to_dict()'s own shape), not
-    the live typed Case/RiskAssessment a just-completed investigation returns."""
-    risk = data.get("risk") or {}
-    if not risk:
-        click.secho("[-] Stored case has no risk assessment.", fg="red")
-        return
-
-    color = _CATEGORY_COLOR.get(RiskCategory(risk["category"]), "white")
-    click.echo()
-    click.secho(f"Risk: {risk['category']}", fg=color, bold=True, nl=False)
-    click.echo(f"   Score: {risk['score']}/100   Confidence: {risk['confidence']:.0%}")
-
-    uncertainty = risk.get("uncertainty") or {}
-    if uncertainty.get("reason"):
-        label = "Why this is not a verdict" if risk["category"] in (
-            c.value for c in INDECISIVE
-        ) else "Why this verdict was qualified"
-        click.secho(f"\n{label}: {uncertainty['reason']}.", fg=color)
-    if uncertainty.get("unavailable_sources"):
-        click.echo(
-            "Not checked: " + ", ".join(uncertainty["unavailable_sources"])
-            + "  (absence of data from these is not evidence of safety)"
-        )
-
-    if risk.get("top_contributors"):
-        click.echo("\nPrimary contributors:")
-        for c in risk["top_contributors"]:
-            click.echo(f"  - {c}")
-
-    entities_by_id = {e["id"]: e for e in data.get("entities", [])}
-    contradicting = [ev for ev in data.get("evidence", []) if ev.get("polarity") == "contradicts_threat"]
-    if contradicting:
-        click.echo("\nCounter-evidence:")
-        for c in contradicting[:5]:
-            entity = entities_by_id.get(c.get("entity_id"))
-            subject = f" [{entity['value']}]" if entity else ""
-            click.echo(f"  - {c['signal']}{subject}: {c['value']}")
-        for note in uncertainty.get("discounted_counter_evidence") or []:
-            click.secho(f"    note: {note}", fg="bright_black")
-
-    if risk.get("historical_similarity"):
-        hs = risk["historical_similarity"]
-        click.echo(f"\nHistorical similarity: {hs['similarity']:.0%} to {hs['pattern_name']}")
-
-    click.echo(f"\n{data.get('explanation', '')}")
-    click.echo()
-    click.secho("Recommended action:", bold=True)
-    click.echo(f"  {data.get('recommendation', '')}")
-
-    _render_provider_usage(data.get("provider_usage") or {})
-
-    failures = data.get("provider_failures") or []
-    if failures:
-        click.secho(f"\n[!] {len(failures)} evidence source(s) unavailable:", fg="yellow")
-        for note in failures:
-            click.echo(f"    - {note}")
-
-    click.secho(f"\n[case: {data['id']}, seed: {data['seed']}]", fg="bright_black")
 
 
 def main():
