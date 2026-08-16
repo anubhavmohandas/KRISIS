@@ -173,15 +173,14 @@ class _KrisisGroup(_KrisisCommand, click.Group):
         self.format_common_options(ctx, formatter)
 
     def format_common_options(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
-        rows = [
-            (
-                click.style(cmd_name, fg="cyan", bold=True),
-                "  ".join(click.style(flag, fg="green") for flag in flags),
-            )
-            for cmd_name, flags in _COMMON_OPTIONS.items()
-        ]
+        # One flag per line rather than a wrapped row: click's wrapper breaks on
+        # internal hyphens (e.g. splits "--show-patterns" mid-flag) at typical
+        # terminal widths, which a flag-name table can't afford.
         with formatter.section("Common / Important Options"):
-            formatter.write_dl(rows, col_max=14)
+            for cmd_name, flags in _COMMON_OPTIONS.items():
+                with formatter.section(cmd_name):
+                    for flag in flags:
+                        formatter.write(f"{'':>{formatter.current_indent}}{click.style(flag, fg='green')}\n")
 
     def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
         commands = []

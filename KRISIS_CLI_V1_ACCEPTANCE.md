@@ -200,6 +200,22 @@ argument-parsing error. Commands: `investigate`, `show`, `cases`, `setup`,
 not persisted, so it is not part of replay) and collection-budget flags
 (`--max-depth`, `--max-entities`, `--max-external-calls`, `--no-prompt`).
 
+Top-level help discoverability: `krisis` / `krisis --help` used to list only
+the five commands, so finding `--show-graph` or `--explain` meant a second
+`krisis investigate --help` call. A "Common / Important Options" block
+(`krisis/cli.py::_KrisisGroup.format_common_options`) now renders directly
+under the command list — `investigate`'s and `show`'s important flags, one
+per line, colorized (cyan subheadings, green flag names) consistent with the
+rest of the CLI's help styling — with the epilog pointing to `krisis
+investigate --help` / `krisis show --help` for the complete, per-command
+option lists including the budget controls (`--max-depth`, `--max-entities`,
+`--max-external-calls`) that are intentionally left out of the summary. No
+investigation, risk, or provider logic changed; no new flags were added —
+every option shown already existed. Regression coverage:
+`tests/test_cli.py::TestTopLevelHelp` (both the bare `krisis` and
+`krisis --help` forms show the summary and the flags it lists are asserted
+to be real options of their command, not just strings that could drift).
+
 ## 13. Example investigation
 
 ```
@@ -247,7 +263,7 @@ storage, confirmed to issue zero network calls during replay.
   (provider-skip/failure split, exact-artifact/infrastructure/structural
   historical semantics, colorized CLI help/output) reviewed and understood
   as coherent in-progress fixes, not reverted.
-- Full pytest and `unittest discover` suites green: 265/265, both runners.
+- Full pytest and `unittest discover` suites green: 267/267, both runners.
 - All CLI help screens (`krisis`, `--help`, and every subcommand's
   `--help`) verified to render useful, non-error output.
 - Live `krisis investigate github.com` run against real collectors and the
@@ -281,12 +297,12 @@ storage, confirmed to issue zero network calls during replay.
 
 ## 15. Test count
 
-**265 / 265 passing**, under both `pytest` and `python3 -m unittest discover
--s tests`. This count already includes the new
-`tests/test_historical_match_semantics.py` (10 tests) and the extended
-`test_cli.py` / `test_investigator_integration.py` coverage for the
-provider-skip/failure split, all authored in the session that produced the
-working-tree changes this acceptance pass validated.
+**267 / 267 passing**, under both `pytest` and `python3 -m unittest discover
+-s tests`. This count includes `tests/test_historical_match_semantics.py`
+(10 tests), the extended `test_cli.py` / `test_investigator_integration.py`
+coverage for the provider-skip/failure split, and `TestTopLevelHelp`
+(2 tests) for the top-level help UX pass, all authored in the session that
+produced the working-tree changes this acceptance pass validated.
 
 ## 16. Mutation-testing summary
 
@@ -301,7 +317,7 @@ test(s) fail, then restoring the original code:
 | Revert `investigator.py`'s skip/failure branch to always report `provider_failures` | 1 test failed as expected |
 
 All three were restored to their working state immediately after
-verification; the full suite was re-run clean (265/265) afterward. This is
+verification; the full suite was re-run clean (267/267) afterward. This is
 in addition to the project's existing, larger body of mutation-verified
 rules documented in `README.md` (commodity-infrastructure suppression,
 structural-similarity weighting, provider budgeting, identity verification,

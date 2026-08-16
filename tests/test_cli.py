@@ -18,6 +18,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+import click
 from click.testing import CliRunner
 
 from krisis.cli import cli
@@ -200,6 +201,41 @@ class TestShowCommand(unittest.TestCase):
             payload["provider_skips"],
             ["virustotal skipped for netflix-login.example: daily budget exhausted"],
         )
+
+
+class TestTopLevelHelp(unittest.TestCase):
+    """Before this, `krisis --help` listed commands but not their flags — finding
+    e.g. --show-graph meant a second `krisis investigate --help` call. These pin
+    that the top-level help surfaces investigate/show's important options directly."""
+
+    def setUp(self):
+        self.runner = CliRunner()
+
+    def test_bare_command_and_help_flag_show_common_options(self):
+        for args in ([], ["--help"]):
+            result = self.runner.invoke(cli, args)
+            self.assertEqual(result.exit_code, 0, args)
+            self.assertIn("Common / Important Options", result.output)
+            self.assertIn("INVESTIGATE", result.output)
+            self.assertIn("SHOW", result.output)
+            for flag in (
+                "--file", "--hash", "--show-graph", "--show-evidence", "--show-pivots",
+                "--show-patterns", "--show-trace", "--explain", "--json", "--verbose",
+            ):
+                self.assertIn(flag, result.output)
+            self.assertIn("krisis investigate --help", result.output)
+            self.assertIn("krisis show --help", result.output)
+
+    def test_common_options_are_real_flags_of_their_command(self):
+        """Guards against the summary drifting from reality if a flag is ever
+        renamed or removed from `investigate`/`show`."""
+        from krisis.cli import _COMMON_OPTIONS
+
+        for cmd_name, flags in _COMMON_OPTIONS.items():
+            command = cli.commands[cmd_name.lower()]
+            actual = {p.opts[0] for p in command.params if isinstance(p, click.Option)}
+            for flag in flags:
+                self.assertIn(flag, actual, f"{flag} listed for {cmd_name} but not a real option")
 
 
 if __name__ == "__main__":
