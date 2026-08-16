@@ -151,14 +151,16 @@ def historical_match_label(match: dict) -> str:
     return label
 
 # Counter-evidence that establishes something narrower than it appears to, keyed
-# on signal name -> why it does not actually rebut an identity finding. Neither
-# of these establishes that the operator is the organization the name resembles
+# on signal name -> why it does not actually rebut an identity finding. None of
+# these establishes that the operator is the organization the name resembles
 # (see NEVER CONFUSE IDENTITY SIMILARITY WITH OWNERSHIP): a certificate proves
 # control of the endpoint it was issued for, and any attacker can obtain one in
-# minutes; how long a domain has existed says nothing about who runs it, and
-# identity_collector.same_operator() already confirmed the operator does *not*
-# match before lookalike_domain was ever emitted — a long-running impersonation
-# is not less of one for having run a while. Letting either net off against an
+# minutes; how long a domain has existed says nothing about who runs it; a
+# matching WHOIS organization name is self-reported and unverified, so it says
+# nothing about who runs it either — identity_collector.same_operator() already
+# checked for a *verified* common operator (shared resolved address) before
+# lookalike_domain was ever emitted, and a long-running impersonation is not
+# less of one for having run a while. Letting any of these net off against an
 # identity finding would mean a phishing site could rebut "this imitates someone
 # else" by doing what most phishing sites already have.
 NARROW_CONTRADICTIONS: dict[str, str] = {
@@ -168,8 +170,14 @@ NARROW_CONTRADICTIONS: dict[str, str] = {
     ),
     "long_lived_domain": (
         "how long this domain has existed says nothing about who operates it — "
-        "identity_collector already confirmed the operator does not match the "
+        "identity_collector already confirmed no verified common operator with the "
         "identity this name resembles before reporting the impersonation"
+    ),
+    "claimed_registrant_org_match": (
+        "WHOIS registrant organization is self-reported and unverified by any "
+        "registry — a matching name does not establish common ownership the way "
+        "a shared resolved address would, and an attacker can enter it just as "
+        "easily as a genuine defensive registration can"
     ),
 }
 

@@ -201,12 +201,41 @@ class TestVerification(unittest.TestCase):
         self.assertEqual(finding.signal, "same_operator_variant")
         self.assertEqual(finding.polarity, Polarity.CONTRADICTS_THREAT)
 
-    def test_a_shared_registrant_alone_is_enough_to_show_one_operator(self):
+    def test_a_shared_registrant_org_string_alone_does_not_prove_one_operator(self):
+        """WHOIS 'Organization' is free text the registrant supplies; no registry
+        verifies it. Treating a matching string as proof of common operatorship
+        would let an attacker suppress a real impersonation finding just by typing
+        the impersonated brand's name into a field nobody checks — this is the
+        conflation KRISIS must not make between 'registration metadata resembles
+        the brand' and 'verified same operator'. Restore same_operator() to treat
+        an org-string match the same as a shared IP and this fails: the lookalike
+        would disappear instead of merely picking up weak, discounted
+        counter-evidence alongside it.
+        """
         evidence = self.collect({
             FAKE: facts(["203.0.113.9"], age_days=900, org="glorptech inc"),
             REAL: facts(["198.51.100.4"], age_days=4000, org="glorptech inc"),
         })
-        self.assertEqual(self._for(evidence, REAL).polarity, Polarity.CONTRADICTS_THREAT)
+        findings = [e for e in evidence if e.value == REAL]
+        signals = {e.signal for e in findings}
+        self.assertIn("lookalike_domain", signals, "an unverified org-name match erased the finding")
+        lookalike = next(e for e in findings if e.signal == "lookalike_domain")
+        self.assertEqual(lookalike.polarity, Polarity.SUPPORTS_THREAT)
+        claimed = next(e for e in findings if e.signal == "claimed_registrant_org_match")
+        self.assertEqual(claimed.polarity, Polarity.CONTRADICTS_THREAT)
+        self.assertLess(claimed.confidence, lookalike.confidence)
+
+    def test_a_shared_ip_alone_is_still_enough_to_show_one_operator(self):
+        """Contrast with the org-string case above: a common resolved address is
+        not self-reported, so it stays sufficient on its own to fully suppress the
+        lookalike finding."""
+        evidence = self.collect({
+            FAKE: facts(["198.51.100.4"], age_days=900),
+            REAL: facts(["198.51.100.4"], age_days=4000),
+        })
+        finding = self._for(evidence, REAL)
+        self.assertEqual(finding.signal, "same_operator_variant")
+        self.assertEqual(finding.polarity, Polarity.CONTRADICTS_THREAT)
 
     def test_an_unverifiable_candidate_stays_neutral(self):
         """No probe configured: the lead is still reported, but it moves nothing."""
@@ -249,6 +278,13 @@ class TestRiskTreatmentOfIdentity(unittest.TestCase):
             source="whois", entity_id="e1", signal="long_lived_domain", value=1200,
             evidence_type="registration", polarity=Polarity.CONTRADICTS_THREAT,
             confidence=0.55, independence=Independence.INDEPENDENT,
+        )
+
+    def _claimed_org(self):
+        return Evidence(
+            source="identity", entity_id="e1", signal="claimed_registrant_org_match", value=REAL,
+            evidence_type="identity", polarity=Polarity.CONTRADICTS_THREAT,
+            confidence=0.3, independence=Independence.INDEPENDENT,
         )
 
     def test_an_impersonating_artifact_is_never_reported_as_low(self):
@@ -315,6 +351,25 @@ class TestRiskTreatmentOfIdentity(unittest.TestCase):
             len(with_age.contradicting), 1,
             "the discounted item must still be reported to the reader",
         )
+
+    def test_a_claimed_registrant_org_match_does_not_offset_an_identity_finding(self):
+        """Regression for the operator-verification conflation in
+        identity_collector.same_operator(): a matching WHOIS registrant
+        organization is self-reported and unverified, so it must not let a real
+        lookalike score as though a verified same-operator variant suppressed it.
+        Delete 'claimed_registrant_org_match' from NARROW_CONTRADICTIONS and an
+        attacker who simply types the impersonated brand's name into their own
+        WHOIS record dilutes the identity floor with a field nobody checks."""
+        engine = RiskEngine()
+        alone = engine.score(CorrelationResult(supporting=[self._identity()], evidence_diversity=0.4))
+        with_claim = engine.score(
+            CorrelationResult(
+                supporting=[self._identity()], contradicting=[self._claimed_org()], evidence_diversity=0.4
+            )
+        )
+        self.assertEqual(alone.score, with_claim.score)
+        self.assertEqual(with_claim.category, RiskCategory.MEDIUM)
+        self.assertTrue(with_claim.uncertainty["discounted_counter_evidence"])
 
     def test_domain_age_still_counts_against_an_ordinary_finding(self):
         """The discount is scoped to identity findings, not a blanket exemption —
