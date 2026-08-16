@@ -227,7 +227,13 @@ and reported separately, then combined:
 certificate/IP/domain discovered in the current investigation is checked against
 `indicators` recorded from prior cases, weighted by how distinguishing that type
 is (a certificate fingerprint is much stronger than an IP). Strong when it fires,
-but blind to an adversary who rotates infrastructure.
+but blind to an adversary who rotates infrastructure. A fired match is further
+split into two readings, never collapsed into one: `exact_artifact` — the shared
+value was itself the prior case's own seed, i.e. this is the very same artifact
+investigated before — versus `infrastructure` — the prior case only pivoted to
+that value (a shared cert, a shared IP), a weaker claim. `historical_match_label()`
+is the one place every renderer (CLI, replay, JSON, AI template) gets this
+phrasing from, so the distinction can't drift out of sync between surfaces.
 
 **Structural similarity** — *"have I seen this **kind** of investigation before?"*
 Each case also stores a signature of its **shape**, with every concrete value
@@ -243,8 +249,9 @@ rather than declared in a list. Neutral observations, the seed's own type, and
 anything commodity are excluded from the signature.
 
 ```
---- Historical Pattern Matches ---
-  overall 64%  (indicator 0% / structural 100%)  structural pattern 'valid_tls_present + long_lived_domain'
+Historical Pattern Matches
+───────────────────────────
+  structurally similar new artifact, no shared indicator — overall 64%  (indicator 0% / structural 100%)  structural pattern 'valid_tls_present + long_lived_domain'
       prior_outcome=confirmed_malicious  pattern_stage=validated
       shared structure:  entity:certificate, entity:ip, rel:resolves_to, ...
 ```
@@ -297,15 +304,21 @@ env-overridable (`KRISIS_VT_RATE_PER_MIN`, `KRISIS_VT_DAILY_QUOTA`,
 `KRISIS_VT_CACHE_TTL`, `KRISIS_VT_MIN_PIVOT_PRIORITY`, `KRISIS_CACHE_TTL`).
 Defaults match VirusTotal's free tier: 4 requests/minute, 500/day.
 
-Two rules hold the line on honesty. A request KRISIS declined to spend returns
-`available=False` with the reason, exactly like a provider outage — "not asked"
-can never become "nothing found". And a cached answer travels as evidence
-stamped `freshness=cached` with its age and original fetch time, so it cannot
-be read as current intelligence. Every decision appears in `--show-trace`, and
-the per-provider ledger prints on every run:
+Two rules hold the line on honesty. A request KRISIS declined to spend still
+returns `available=False` with the reason, so "not asked" can never silently
+become "nothing found" — but it is recorded and reported separately from a
+genuine collector failure: a deliberate skip lands in `case.provider_skips`
+(printed as `[i] N provider request(s) deliberately skipped`), while an actual
+outage or error lands in `case.provider_failures` (`[!] N evidence source(s)
+unavailable`). A scarce-budget rule working as designed must never read as a
+broken evidence source. And a cached answer travels as evidence stamped
+`freshness=cached` with its age and original fetch time, so it cannot be read
+as current intelligence. Every decision appears in `--show-trace`, and the
+per-provider ledger prints on every run:
 
 ```
---- Provider Usage ---
+Provider Usage
+───────────────
   dns            calls 0  cached 9  reused 9
   virustotal     calls 0  cached 1  skipped 4
       not spent: discovered entity below the value threshold for a scarce provider
@@ -411,10 +424,11 @@ faked investigator). Run:
 python3 -m unittest discover -s tests -v
 ```
 
-252 tests covering: graph dedup/traversal, pivot budget/depth/noisy-fanout
+265 tests covering: graph dedup/traversal, pivot budget/depth/noisy-fanout
 enforcement, evidence polarity/diversity correlation, risk determinism/
 counter-evidence/diminishing-returns, provider-failure handling (never
-silently treated as "clean"), provider-payload normalization, provider
+silently treated as "clean", and never conflated with a deliberate planner
+skip), provider-payload normalization, provider
 budgeting (dedup, cache, TTL, rate limit, daily quota, backoff, value gate),
 identity derivation and verification, and — the core differentiator —
 historical pattern matching that recognises a domain through shared
@@ -506,5 +520,5 @@ krisis/
   ai/            explanation layer
   cli.py         click CLI
   config.py      default collector wiring, API key loading
-tests/           252 tests against the real execution path, mutation-verified
+tests/           265 tests against the real execution path, mutation-verified
 ```

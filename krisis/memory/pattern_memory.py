@@ -159,10 +159,15 @@ class PatternMemory:
             weight = INDICATOR_WEIGHTS.get(entity.type.value)
             if weight is None:
                 continue
-            # depth-0 (the seed itself) is excluded — matching on the seed domain
-            # itself would trivially "match" a re-investigation of the same domain,
-            # not a genuine infrastructure resemblance.
-            if entity.depth == 0 and entity.type.value == "domain":
+            # The current investigation's own seed cannot meaningfully match itself.
+            # This must compare against the literal seed *value*, not "any depth-0
+            # domain": a message investigation extracts URLs/domains as depth-0
+            # entities too, and those are real artifacts, not the seed — excluding
+            # them by depth alone silently threw away the case that matters most:
+            # "this exact artifact was investigated directly before, and now shows
+            # up again inside a message" (see EXACT ARTIFACT VS INFRASTRUCTURE
+            # OVERLAP below).
+            if exclude_seed and entity.value.lower() == exclude_seed.lower():
                 continue
             # Commodity infrastructure is not a distinguishing indicator. Two unrelated
             # companies sharing a mail vendor's IPs is a fact about the vendor, and
@@ -176,7 +181,8 @@ class PatternMemory:
 
         total_possible_weight = sum(w for _, _, w in candidates)
         matches_by_case: dict[str, dict[str, Any]] = defaultdict(
-            lambda: {"weight": 0.0, "indicators": [], "outcome": None, "seed": None}
+            lambda: {"weight": 0.0, "indicators": [], "exact_indicators": [],
+                     "outcome": None, "seed": None}
         )
 
         for entity_type, value, weight in candidates:
@@ -186,23 +192,41 @@ class PatternMemory:
                 info = matches_by_case[case_id]
                 info["weight"] += weight
                 info["indicators"].append(f"{entity_type}:{value}")
+                # EXACT ARTIFACT VS INFRASTRUCTURE OVERLAP: a matched value that was
+                # itself the *seed* of the prior case means this investigation is
+                # looking at the very same artifact that prior case was about — "I
+                # have seen this exact artifact before". A matched value that was
+                # merely something the prior case *pivoted to* (a shared cert, a
+                # shared IP, an infrastructure neighbor) is a weaker claim —
+                # "infrastructure overlap" — and the two must not be reported as the
+                # same thing just because both produce an indicator_similarity > 0.
+                if (row.get("seed") or "").lower() == value.lower():
+                    info["exact_indicators"].append(f"{entity_type}:{value}")
                 info["outcome"] = row.get("outcome") or info["outcome"]
                 info["seed"] = row.get("seed")
 
         results = []
         for case_id, info in matches_by_case.items():
             similarity = min(1.0, info["weight"] / total_possible_weight) if total_possible_weight else 0.0
+            indicator_kind = "exact_artifact" if info["exact_indicators"] else "infrastructure"
+            pattern_name = (
+                (f"the same artifact investigated before as '{info['seed']}'" if info["exact_indicators"]
+                 else f"infrastructure overlap with prior case for '{info['seed']}'")
+                if info["seed"] else f"prior case {case_id}"
+            )
             results.append(
                 {
                     "pattern_id": case_id,
                     "case_ids": {case_id},
-                    "pattern_name": (
-                        f"infrastructure overlap with prior case for '{info['seed']}'"
-                        if info["seed"] else f"infrastructure overlap with case {case_id}"
-                    ),
+                    "pattern_name": pattern_name,
                     "indicator_similarity": round(similarity, 3),
                     "structural_similarity": 0.0,
                     "matched_indicators": info["indicators"],
+                    # Which of matched_indicators are the exact prior-case artifact,
+                    # as opposed to shared downstream infrastructure. See CLI/risk
+                    # rendering (historical_match_label) for how this becomes the
+                    # "exact artifact seen before" vs "infrastructure overlap" text.
+                    "indicator_kind": indicator_kind,
                     "matched_facets": [],
                     "pattern_stage": None,
                     "maturity": 1.0,   # a concrete shared indicator needs no maturing
@@ -252,6 +276,10 @@ class PatternMemory:
                     "indicator_similarity": 0.0,
                     "structural_similarity": round(similarity, 3),
                     "matched_indicators": [],
+                    # No shared concrete value at all on this dimension — never
+                    # "exact_artifact" or "infrastructure" on its own; _merge()
+                    # fills this in from the indicator dimension if that also fired.
+                    "indicator_kind": None,
                     "matched_facets": sorted(shared),
                     "pattern_stage": stage,
                     "maturity": STAGE_WEIGHT.get(stage, 0.0),

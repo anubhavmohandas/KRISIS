@@ -149,12 +149,39 @@ class _KrisisCommand(click.Command):
                 formatter.write_dl(opts)
 
 
+#  --help was two levels deep (`krisis investigate --help`) to find the flags that
+# matter for triage. This table surfaces just the names at a glance from `krisis`
+# itself; full descriptions and budget flags stay behind each command's own --help.
+_COMMON_OPTIONS = {
+    "INVESTIGATE": (
+        "--file", "--hash", "--show-graph", "--show-evidence", "--show-pivots",
+        "--show-patterns", "--show-trace", "--explain", "--json", "--verbose",
+    ),
+    "SHOW": (
+        "--show-graph", "--show-evidence", "--show-pivots", "--show-patterns",
+        "--explain", "--json", "--verbose",
+    ),
+}
+
+
 class _KrisisGroup(_KrisisCommand, click.Group):
     """Top-level `krisis` group: banner + colorized, untruncated command list."""
 
     def format_options(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
         _KrisisCommand.format_options(self, ctx, formatter)
         self.format_commands(ctx, formatter)
+        self.format_common_options(ctx, formatter)
+
+    def format_common_options(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        rows = [
+            (
+                click.style(cmd_name, fg="cyan", bold=True),
+                "  ".join(click.style(flag, fg="green") for flag in flags),
+            )
+            for cmd_name, flags in _COMMON_OPTIONS.items()
+        ]
+        with formatter.section("Common / Important Options"):
+            formatter.write_dl(rows, col_max=14)
 
     def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
         commands = []
@@ -192,9 +219,11 @@ _EXAMPLES_EPILOG = click.style("Examples:", fg="cyan", bold=True) + "\n\n\b\n" +
         "krisis outcome <case_id> confirmed_malicious",
         "krisis setup",
     )
-) + "\n\n" + click.style(
-    "Each command has its own flags (e.g. --explain, --show-graph, --json) — "
-    "run `krisis COMMAND --help` to see them.", fg="bright_black"
+) + "\n\n" + click.style("Full options — including budget controls (", fg="bright_black") + click.style(
+    "--max-depth, --max-entities, --max-external-calls", fg="green"
+) + click.style("):", fg="bright_black") + "\n\n\b\n" + "\n".join(
+    click.style("  " + line, fg="cyan")
+    for line in ("krisis investigate --help", "krisis show --help")
 )
 
 

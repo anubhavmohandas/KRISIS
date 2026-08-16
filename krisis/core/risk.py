@@ -114,6 +114,42 @@ def historical_impact(match: dict) -> float:
     """
     return (match.get("similarity") or 0.0) * outcome_trust(match.get("prior_outcome"))
 
+
+def historical_match_label(match: dict) -> str:
+    """One clear phrase for what a historical match actually means.
+
+    "Historical similarity: N%" alone lets a reader conflate two very different
+    claims: "I have seen this exact artifact before" (indicator_kind ==
+    "exact_artifact" — a matched value that was itself the prior case's own
+    seed) versus "this merely shares infrastructure with a prior case"
+    (indicator_kind == "infrastructure" — a matched value the prior case only
+    pivoted to, e.g. a shared cert or IP) versus "no concrete value is shared
+    at all, only the shape of the investigation resembles one" (structural
+    similarity alone). Every caller that surfaces a historical match to a
+    human must use this instead of inventing its own phrasing, or the three
+    meanings drift back out of sync with each other.
+    """
+    match_type = match.get("match_type", "indicator")
+    has_indicator = match_type in ("indicator", "indicator+structural") or bool(
+        match.get("indicator_similarity")
+    )
+    has_structural = match_type in ("structural", "indicator+structural") or bool(
+        match.get("structural_similarity")
+    )
+
+    if has_indicator and match.get("indicator_kind") == "exact_artifact":
+        label = "exact artifact seen before"
+    elif has_indicator:
+        label = "infrastructure overlap with a prior case"
+    elif has_structural:
+        label = "structurally similar new artifact, no shared indicator"
+    else:
+        label = "resemblance to a prior case"
+
+    if has_indicator and has_structural:
+        label += " + structural resemblance"
+    return label
+
 # Counter-evidence that establishes something narrower than it appears to, keyed
 # on signal name -> why it does not actually rebut an identity finding. Neither
 # of these establishes that the operator is the organization the name resembles
@@ -196,11 +232,11 @@ class RiskEngine:
             prior_outcome = historical_similarity.get("prior_outcome") or Outcome.UNKNOWN.value
             historical_points = HISTORICAL_MAX_POINTS * similarity * outcome_trust(prior_outcome)
             if historical_points > 0:
-                match_type = historical_similarity.get("match_type", "indicator")
+                label = historical_match_label(historical_similarity)
                 support_contributors.append(
                     (
                         historical_points,
-                        f"historical similarity {similarity:.0%} ({match_type}) to "
+                        f"historical match — {label} ({similarity:.0%}) to "
                         f"{historical_similarity.get('pattern_name', 'a prior pattern')} "
                         f"(prior outcome: {prior_outcome})",
                     )
@@ -421,8 +457,9 @@ class RiskEngine:
         if contra_points >= CONFLICT_MIN_POINTS:
             return None
         pattern_name = historical_similarity.get("pattern_name", "a prior pattern")
+        label = historical_match_label(historical_similarity)
         return (
-            f"this artifact has a {similarity:.0%} historical resemblance to "
+            f"this artifact has a {similarity:.0%} historical resemblance ({label}) to "
             f"'{pattern_name}', a case a human confirmed malicious — a resemblance "
             f"this strong to confirmed-malicious infrastructure cannot be reported "
             f"as looking safe, even with clean current reputation"

@@ -297,7 +297,12 @@ class Case:
     explanation: str = ""
     recommendation: str = ""
     outcome: Optional[str] = None    # an Outcome value, or None while never validated
+    # A provider that ran and could not answer (outage, timeout, error response).
     provider_failures: list[str] = field(default_factory=list)
+    # A provider request the planner chose not to spend (budget/value-gate/backoff).
+    # Kept separate from provider_failures: neither is "clean", but only one is a
+    # provider malfunction — collapsing them reads a deliberate decision as a fault.
+    provider_skips: list[str] = field(default_factory=list)
     # Per-provider accounting: what was spent, reused, or deliberately not spent.
     # Stored with the case because "why was this provider not consulted?" is part of
     # the investigation record, not a runtime detail.
@@ -319,5 +324,6 @@ class Case:
             "recommendation": self.recommendation,
             "outcome": self.outcome,
             "provider_failures": self.provider_failures,
+            "provider_skips": self.provider_skips,
             "provider_usage": self.provider_usage,
         }

@@ -13,6 +13,7 @@ This exercises historical pattern matching independent of current reputation.
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -23,6 +24,7 @@ from krisis.collectors.page_collector import PageCollector
 from krisis.core.investigator import Investigator
 from krisis.core.models import Entity, Evidence, Independence, Polarity
 from krisis.core.pivot_engine import InvestigationBudget
+from krisis.core.provider_planner import ProviderPlanner, ProviderPolicy
 from krisis.memory.case_memory import CaseMemory
 from krisis.memory.pattern_memory import PatternMemory
 from krisis.memory.storage import Storage
@@ -129,6 +131,48 @@ class TestInvestigatorIntegration(unittest.TestCase):
         stored = self.case_memory.get(case.id)
         self.assertIsNotNone(stored)
         self.assertEqual(stored["seed"], "suspicious-login.com")
+
+    def test_a_deliberately_skipped_provider_is_not_reported_as_a_failure(self):
+        """A planner skip (budget/backoff/value-gate) must land in provider_skips,
+        never provider_failures — and a genuine collector outage must land in
+        provider_failures, never provider_skips. Collapsing the two reports a
+        budget rule working exactly as designed as a broken evidence source.
+        """
+        policy = ProviderPolicy(name="virustotal", cache_ttl_seconds=0, backoff_seconds=300)
+        self.storage.record_provider_event("virustotal", "rate_limited", time.time() - 10)
+        planner = ProviderPlanner(policies={"virustotal": policy}, storage=self.storage)
+
+        investigator = Investigator(
+            collectors=[FakeDNSCollector(), FakeTLSCollector(), FakeVTCollector(), FailingWHOISCollector()],
+            case_memory=self.case_memory,
+            pattern_memory=self.pattern_memory,
+            budget=InvestigationBudget(max_depth=2, max_entities=20, max_external_calls=50),
+            explainer=Explainer(use_llm=False),
+            planner=planner,
+        )
+        case, _ = investigator.investigate("suspicious-login.com")
+
+        self.assertTrue(
+            any("virustotal" in s and "skipped" in s for s in case.provider_skips),
+            "a backed-off virustotal request must be recorded as a skip",
+        )
+        self.assertFalse(
+            any("virustotal" in f for f in case.provider_failures),
+            "a deliberate skip must never be reported as an unavailable evidence source",
+        )
+        self.assertTrue(
+            any("whois" in f for f in case.provider_failures),
+            "a genuine collector outage must still be reported as a failure",
+        )
+        self.assertFalse(
+            any("whois" in s for s in case.provider_skips),
+            "a genuine collector outage must never be reported as a deliberate skip",
+        )
+
+        # both distinctions must survive the round trip through storage/JSON
+        stored = self.case_memory.get(case.id)
+        self.assertTrue(any("virustotal" in s for s in stored["provider_skips"]))
+        self.assertTrue(any("whois" in f for f in stored["provider_failures"]))
 
     def test_url_seed_connects_to_its_domain_in_the_graph(self):
         # See GRAPH IS PART OF THE REASONING: "URL -> domain" is a required edge,

@@ -300,8 +300,16 @@ class Investigator:
                 self.budget.register_call()
 
             if not result.available:
-                case.provider_failures.append(f"{collector.name} unavailable for {entity.value}: {result.note}")
-                trace.log("collector_unavailable", collector=collector.name, entity=entity.value, note=result.note)
+                if decision.action == "skipped":
+                    # The planner chose not to spend this request (budget, value gate,
+                    # backoff) — a policy decision, not a provider malfunction. Reusing
+                    # provider_failures here would report a scarce-budget rule working
+                    # as intended as though the provider were down.
+                    case.provider_skips.append(f"{collector.name} skipped for {entity.value}: {decision.reason}")
+                    trace.log("collector_skipped", collector=collector.name, entity=entity.value, reason=decision.reason)
+                else:
+                    case.provider_failures.append(f"{collector.name} unavailable for {entity.value}: {result.note}")
+                    trace.log("collector_unavailable", collector=collector.name, entity=entity.value, note=result.note)
                 continue
 
             # result.available is already True here (checked above): the collector

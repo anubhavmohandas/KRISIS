@@ -33,6 +33,7 @@ from typing import Any, Optional
 from ..core.correlation import CorrelationResult
 from ..core.graph import EntityGraph
 from ..core.models import Case, RiskCategory
+from ..core.risk import historical_match_label
 
 SYSTEM_PROMPT = (
     "You are the explanation layer of KRISIS, a threat-investigation engine. "
@@ -117,16 +118,15 @@ class Explainer:
 
         if case.pattern_matches:
             best = case.pattern_matches[0]
-            # Name which dimension matched: "resembles a prior case" means something
-            # very different when no concrete indicator is shared at all.
-            basis = {
-                "indicator": "shared infrastructure",
-                "structural": "case structure alone, with no shared infrastructure",
-                "indicator+structural": "shared infrastructure and case structure",
-            }.get(best.get("match_type", "indicator"), "shared infrastructure")
+            # Name which dimension matched, and — critically — whether the shared
+            # indicator (if any) was the exact artifact a prior case investigated,
+            # or merely infrastructure it happened to touch. "Resembles a prior
+            # case" means something very different in each of those readings, and
+            # collapsing them into one generic "historical similarity" is exactly
+            # the ambiguity this line exists to remove.
             lines.append(
-                f"Historical similarity: {best['similarity']:.0%} to {best['pattern_name']} "
-                f"via {basis}"
+                f"Historical match — {historical_match_label(best)}: {best['similarity']:.0%} to "
+                f"{best['pattern_name']}"
                 f"{' (prior outcome: ' + best['prior_outcome'] + ')' if best.get('prior_outcome') else ''}, "
                 f"independent of current reputation."
             )
