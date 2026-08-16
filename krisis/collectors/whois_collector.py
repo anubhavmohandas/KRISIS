@@ -18,6 +18,10 @@ from .base import CollectorResult, EvidenceCollector
 
 NEW_DOMAIN_THRESHOLD_DAYS = 30
 YOUNG_DOMAIN_THRESHOLD_DAYS = 180
+# Reuses NEW_DOMAIN_THRESHOLD_DAYS's value rather than inventing a second
+# number — "about to expire" and "just registered" are the same order of
+# magnitude of how close a domain is to a registration-lifecycle edge.
+EXPIRING_SOON_THRESHOLD_DAYS = NEW_DOMAIN_THRESHOLD_DAYS
 
 
 def _first(value: Any) -> Any:
@@ -111,6 +115,61 @@ class WHOISCollector(EvidenceCollector):
                         confidence=0.5,
                         independence=Independence.INDEPENDENT,
                         provenance=f"domain registered {age_days} days ago",
+                    )
+                )
+
+        expiration_date = _first(record.get("expiration_date"))
+        if isinstance(expiration_date, datetime):
+            if expiration_date.tzinfo is None:
+                expiration_date = expiration_date.replace(tzinfo=timezone.utc)
+            days_left = (expiration_date - datetime.now(timezone.utc)).days
+            if days_left < 0:
+                evidence.append(
+                    Evidence(
+                        source=self.name,
+                        entity_id=entity.id,
+                        signal="expired_domain_still_active",
+                        value=days_left,
+                        evidence_type="registration",
+                        polarity=Polarity.SUPPORTS_THREAT,
+                        confidence=0.35,
+                        independence=Independence.INDEPENDENT,
+                        provenance=(
+                            f"WHOIS expiration date is {-days_left} day(s) in the past, but "
+                            f"a record was still returned (registry purge lag is common, so "
+                            f"this stays weak on its own)"
+                        ),
+                    )
+                )
+            elif days_left < EXPIRING_SOON_THRESHOLD_DAYS:
+                evidence.append(
+                    Evidence(
+                        source=self.name,
+                        entity_id=entity.id,
+                        signal="domain_expiring_soon",
+                        value=days_left,
+                        evidence_type="registration",
+                        polarity=Polarity.NEUTRAL,
+                        confidence=0.3,
+                        independence=Independence.INDEPENDENT,
+                        provenance=(
+                            f"domain expires in {days_left} day(s) — too common among "
+                            f"legitimate, simply-unrenewed domains to score as a threat signal"
+                        ),
+                    )
+                )
+            else:
+                evidence.append(
+                    Evidence(
+                        source=self.name,
+                        entity_id=entity.id,
+                        signal="domain_expiration_days",
+                        value=days_left,
+                        evidence_type="registration",
+                        polarity=Polarity.NEUTRAL,
+                        confidence=0.5,
+                        independence=Independence.INDEPENDENT,
+                        provenance=f"domain expires in {days_left} day(s)",
                     )
                 )
 

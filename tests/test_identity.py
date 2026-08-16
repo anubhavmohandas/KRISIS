@@ -17,10 +17,10 @@ import unittest
 
 from krisis.collectors.identity_collector import IdentityCollector, facts_from_evidence
 from krisis.core.correlation import CorrelationResult
-from krisis.core.identity import canonical_label, candidates, decode_idn
+from krisis.core.identity import canonical_label, candidates, decode_idn, mixed_script_label
 from krisis.core.investigator import Investigator
 from krisis.core.models import (
-    Entity, EntityType, Evidence, Independence, Polarity, RiskCategory,
+    Coverage, Entity, EntityType, Evidence, Independence, Polarity, RiskCategory,
 )
 from krisis.core.pivot_engine import InvestigationBudget
 from krisis.core.risk import RiskEngine
@@ -121,6 +121,97 @@ class TestCandidateDerivation(unittest.TestCase):
 
     def test_an_artifact_never_impersonates_itself(self):
         self.assertNotIn(REAL, [c.value for c in candidates(REAL, references={REAL})])
+
+    def test_a_known_identity_placed_as_a_subdomain_label_is_derived(self):
+        """'glorptech.attacker.example' places the known identity's own name as a
+        subdomain label of an unrelated domain — a distinct deceptive pattern
+        from every registrable-label mechanism above, and only reachable via a
+        known reference (there is no natural suffix to pair a bare subdomain
+        label with)."""
+        derived = candidates("glorptech.attacker.example", references={REAL})
+        self.assertIn(REAL, [c.value for c in derived])
+
+    def test_a_decorated_subdomain_label_is_also_derived(self):
+        derived = candidates("secure-glorptech.attacker.example", references={REAL})
+        self.assertIn(REAL, [c.value for c in derived])
+
+    def test_a_glyph_substituted_subdomain_label_is_also_derived(self):
+        derived = candidates("g1orptech.attacker.example", references={REAL})
+        self.assertIn(REAL, [c.value for c in derived])
+
+    def test_no_reference_configured_means_no_subdomain_candidate(self):
+        """Honest scope limit: unlike the registrable-label mechanisms, subdomain
+        placement has no suffix of its own to pair a bare label with — it can only
+        ever match a *known* reference."""
+        self.assertEqual(candidates("glorptech.attacker.example"), [])
+
+    def test_an_unrelated_subdomain_label_is_not_treated_as_impersonation(self):
+        derived = candidates("www.attacker.example", references={REAL})
+        self.assertNotIn(REAL, [c.value for c in derived])
+
+
+class TestMixedScriptDetection(unittest.TestCase):
+    """Script-*mixing within one label* is the deceptive pattern (Latin 'p' next
+    to Cyrillic 'а'); a label written entirely in one script — including a
+    non-Latin one — must never be flagged just for not being Latin."""
+
+    def test_a_script_mixed_label_is_detected(self):
+        self.assertTrue(mixed_script_label("pаypal"))  # Latin + one Cyrillic 'а'
+
+    def test_a_pure_latin_label_is_not_flagged(self):
+        self.assertFalse(mixed_script_label("paypal"))
+
+    def test_a_pure_cyrillic_label_is_not_flagged(self):
+        self.assertFalse(mixed_script_label("яндекс"))
+
+    def test_a_pure_greek_label_is_not_flagged(self):
+        self.assertFalse(mixed_script_label("αβγδ"))
+
+    def test_digits_and_hyphens_do_not_count_as_a_second_script(self):
+        self.assertFalse(mixed_script_label("glorptech-2024"))
+
+    def test_collector_emits_mixed_script_domain_for_a_script_mixed_label(self):
+        """Delete IdentityCollector._mixed_script_evidence and a script-mixed
+        label that isn't in the curated confusable-character table gets no
+        credit at all."""
+        entity = Entity(value="pаypal-secure.example", type=EntityType.DOMAIN)
+        evidence = IdentityCollector(probe=None, references=lambda: set()).collect(entity).evidence
+        finding = next(e for e in evidence if e.signal == "mixed_script_domain")
+        self.assertEqual(finding.polarity, Polarity.SUPPORTS_THREAT)
+        self.assertEqual(finding.evidence_type, "identity")
+
+    def test_collector_emits_nothing_for_a_pure_script_domain(self):
+        entity = Entity(value="glorptech.com", type=EntityType.DOMAIN)
+        evidence = IdentityCollector(probe=None, references=lambda: set()).collect(entity).evidence
+        self.assertFalse([e for e in evidence if e.signal == "mixed_script_domain"])
+
+    def test_a_bare_mixed_script_finding_does_not_force_the_verified_impersonation_floor(self):
+        """mixed_script_domain is evidence_type='identity' like lookalike_domain,
+        but unlike it, is unverified and names no external referent — its .value
+        is the artifact's *own* label. Reusing risk.py's LOW-band impersonation
+        floor for it would word the reason as 'imitates an established identity
+        operated by someone else (<the artifact's own mixed label>)', which is
+        simply false. Delete risk.py's VERIFIED_REFERENT_SIGNALS scoping (revert
+        _categorize to call _identity_support instead of _verified_impersonation)
+        and this test fails."""
+        mixed_script = Evidence(
+            source="identity", entity_id="e1", signal="mixed_script_domain", value=["aurбoratech"],
+            evidence_type="identity", polarity=Polarity.SUPPORTS_THREAT, confidence=0.45,
+            independence=Independence.INDEPENDENT,
+        )
+        clean_reputation = Evidence(
+            source="virustotal", entity_id="e1", signal="no_detections", value=0,
+            evidence_type="reputation", polarity=Polarity.NEUTRAL, confidence=0.3,
+            independence=Independence.INDEPENDENT,
+        )
+        coverage = Coverage(
+            attempted={"virustotal"}, available={"virustotal"}, evidence_types={"reputation"}
+        )
+        result = RiskEngine().score(
+            CorrelationResult(supporting=[mixed_script], neutral=[clean_reputation], evidence_diversity=0.3),
+            coverage=coverage,
+        )
+        self.assertNotIn("established identity operated by someone else", result.uncertainty.get("reason", ""))
 
 
 class TestVerification(unittest.TestCase):
@@ -287,6 +378,13 @@ class TestRiskTreatmentOfIdentity(unittest.TestCase):
             confidence=0.3, independence=Independence.INDEPENDENT,
         )
 
+    def _cert_subject_org(self):
+        return Evidence(
+            source="tls", entity_id="e1", signal="certificate_subject_org_match", value=REAL,
+            evidence_type="behavior", polarity=Polarity.CONTRADICTS_THREAT,
+            confidence=0.5, independence=Independence.INDEPENDENT,
+        )
+
     def test_an_impersonating_artifact_is_never_reported_as_low(self):
         """Delete the identity branch in RiskEngine._categorize and a verified
         typosquat with unremarkable infrastructure is reported as looking safe — the
@@ -370,6 +468,44 @@ class TestRiskTreatmentOfIdentity(unittest.TestCase):
         self.assertEqual(alone.score, with_claim.score)
         self.assertEqual(with_claim.category, RiskCategory.MEDIUM)
         self.assertTrue(with_claim.uncertainty["discounted_counter_evidence"])
+
+    def test_a_certificate_subject_org_match_does_not_offset_an_identity_finding(self):
+        """A CA-vetted subject organization confirms *some* real-world entity
+        controls this endpoint — not that this artifact isn't impersonating a
+        *different* brand elsewhere in its identity. A phishing site can hold a
+        legitimate OV/EV certificate for a shell company while still imitating
+        an unrelated target. Delete 'certificate_subject_org_match' from
+        NARROW_CONTRADICTIONS and a lookalike domain with an unrelated OV cert
+        dilutes the identity floor the same way a bare valid_tls_present
+        already cannot."""
+        engine = RiskEngine()
+        alone = engine.score(CorrelationResult(supporting=[self._identity()], evidence_diversity=0.4))
+        with_subject_org = engine.score(
+            CorrelationResult(
+                supporting=[self._identity()], contradicting=[self._cert_subject_org()],
+                evidence_diversity=0.4,
+            )
+        )
+        self.assertEqual(alone.score, with_subject_org.score)
+        self.assertEqual(with_subject_org.category, RiskCategory.MEDIUM)
+        self.assertTrue(with_subject_org.uncertainty["discounted_counter_evidence"])
+
+    def test_certificate_subject_org_match_still_counts_against_an_ordinary_finding(self):
+        """The discount is scoped to identity findings, not a blanket exemption."""
+        engine = RiskEngine()
+        infrastructure = Evidence(
+            source="vt", entity_id="e1", signal="malicious_detection", value="4/70",
+            evidence_type="reputation", polarity=Polarity.SUPPORTS_THREAT, confidence=0.9,
+            independence=Independence.INDEPENDENT,
+        )
+        alone = engine.score(CorrelationResult(supporting=[infrastructure], evidence_diversity=0.4))
+        with_subject_org = engine.score(
+            CorrelationResult(
+                supporting=[infrastructure], contradicting=[self._cert_subject_org()],
+                evidence_diversity=0.4,
+            )
+        )
+        self.assertLess(with_subject_org.score, alone.score)
 
     def test_domain_age_still_counts_against_an_ordinary_finding(self):
         """The discount is scoped to identity findings, not a blanket exemption —

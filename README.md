@@ -427,7 +427,7 @@ faked investigator). Run:
 python3 -m unittest discover -s tests -v
 ```
 
-286 tests covering: graph dedup/traversal, pivot budget/depth/noisy-fanout
+337 tests covering: graph dedup/traversal, pivot budget/depth/noisy-fanout
 enforcement, evidence polarity/diversity correlation, risk determinism/
 counter-evidence/diminishing-returns, provider-failure handling (never
 silently treated as "clean", and never conflated with a deliberate planner
@@ -462,6 +462,19 @@ suppression, the identity risk floor, valid TLS offsetting an identity finding,
 the `looks_like` pivot rule, and an impersonated identity being dismissed as
 commodity infrastructure because it appears in many prior cases.
 
+Added with the phishing-signal-coverage pass (see
+`docs/PHISHING_SIGNAL_MATRIX.md` for the full audit this drove), each
+verified the same way: the malware-delivery interaction bonus (deceptive
+URL shape + direct executable download), and a certificate subject
+organization match being barred from offsetting an identity finding the
+same way a bare valid-TLS or WHOIS-org-match signal already is — plus a
+correctness fix the validation-matrix expansion surfaced: the LOW-band
+"impersonation" floor no longer fires on *any* identity-type evidence
+(`mixed_script_domain` included), only on signals that actually name a
+verified external referent (`lookalike_domain`), so a script-mixed label
+with no referent is never worded as "imitates an established identity
+operated by someone else."
+
 ## Current scope and honest limitations
 
 This is the first working slice of the full loop described in the design
@@ -469,6 +482,25 @@ docs, not the finished system. Implemented for real, end to end:
 
 - URL/domain/IP/hash/message investigation with real indicator extraction
 - DNS, WHOIS, TLS, IP/ASN, and VirusTotal collectors (each independently optional)
+- Page/redirect collector: credential-form detection, external form action,
+  cross-domain redirects, meta-refresh redirects, executable/script download
+  links, brand-vs-domain mismatch, and URL-shape deception (literal-IP host,
+  userinfo trick) — the full page-fetch half of a credential-phishing or
+  malware-delivery shape, not just the impersonation half
+- Identity coverage beyond confusable-character/decoration derivation:
+  mixed-Unicode-script label detection, and a known identity placed as a
+  *subdomain* label of an unrelated domain (`brand.attacker.example`), both
+  reusing the same resolves/established/different-operator verification
+  pipeline as every other identity finding
+- Certificate subject-organization identity (present only on OV/EV certs —
+  absence is silent, never scored as suspicious) alongside the existing
+  issuer-organization signal, discounted from offsetting an identity finding
+  the same way a bare valid-TLS presence already is
+- WHOIS expiration proximity, mirroring the existing registration-age pattern
+- DNS SPF/DMARC presence (weak positive signal only; absence is silent —
+  too common among legitimate domains to score as suspicious)
+- Sender/URL domain mismatch within message-body text: the message never
+  links back to the domain any email address mentioned in it belongs to
 - Budget-limited pivot engine with accept/reject reasoning
 - Provider planner: per-provider policy, cross-run response cache, in-run
   deduplication, sliding-window rate limiting, daily quota, rate-limit backoff,
@@ -495,10 +527,6 @@ docs, not the finished system. Implemented for real, end to end:
 Not yet implemented (explicitly out of scope for this pass, see design docs
 §25 and self-critique checklist):
 
-- URL-scanning/redirect-chain collector. Identity evidence now enters structural
-  signatures automatically, so the "brand impersonation + credential harvesting"
-  shape is half observable — the impersonation half. Nothing yet observes the
-  credential-harvesting half, because no collector fetches the page
 - Referent *legitimacy*. The identity layer verifies that a referent is
   established, resolving and separately operated; it cannot tell a legitimate
   brand from an older squatter, so `1inkedin.com` is reported as resembling both
@@ -512,23 +540,36 @@ Not yet implemented (explicitly out of scope for this pass, see design docs
 - Cases stored before structural matching existed contribute indicators only.
   There is no backfill: their shape is recorded the next time they are
   investigated
-- Additional threat-intel provider adapters beyond VirusTotal
+- Additional threat-intel provider adapters beyond VirusTotal, suspicious-TLD
+  and disposable-mail-provider lists, and TLS hostname-mismatch as *scored*
+  evidence (currently a hostname/cert mismatch correctly reports the `tls`
+  source as unavailable rather than either "clean" or "malicious" — turning
+  that into a positive threat signal is a real future option, deliberately
+  not built this pass to avoid re-litigating already-tested behavior)
+- Structured email/MIME header parsing (From/Reply-To/display-name mismatch,
+  SPF/DKIM/DMARC alignment against a specific message, attachment metadata).
+  The message-body sender/URL-domain mismatch signal above works with what
+  the current free-text input already provides; the broader header-aware
+  version needs a structured email input type the CLI does not expose yet
 - Desktop app / browser extension (explicitly future phases per the design doc)
 - Evidence-independence classification beyond the collector-declared default
   (currently each collector marks its own evidence's independence; a
   cross-provider "these two sources actually derive from the same upstream
   feed" detector does not yet exist)
 
+Full signal-by-signal audit, including every deferred item and why, lives in
+`docs/PHISHING_SIGNAL_MATRIX.md`.
+
 ## Directory layout
 
 ```
 krisis/
   core/          models, graph, indicators, pivot_engine, correlation, risk, recommend, investigator
-  collectors/    base interface + dns/whois/tls/ip/virustotal adapters
+  collectors/    base interface + dns/whois/tls/ip/virustotal/page/message/identity adapters
   memory/        sqlite storage, pattern_memory, case_memory
   ai/            explanation layer
   cli.py         click CLI
   config.py      default collector wiring, API key loading
   pdf_report.py  PDF case report renderer (stored case -> PDF, no network)
-tests/           286 tests against the real execution path, mutation-verified
+tests/           337 tests against the real execution path, mutation-verified
 ```

@@ -39,7 +39,7 @@ import requests
 from ..core.identity import label_similarity
 from ..core.indicators import registrable_domain, same_organization
 from ..core.models import Entity, Evidence, Independence, Polarity
-from ..core.url_intent import classify as classify_url_intent
+from ..core.url_intent import classify as classify_url_intent, has_userinfo, is_ip_literal_host
 from .base import CollectorResult, EvidenceCollector
 
 CONNECT_TIMEOUT = 3.0
@@ -66,6 +66,15 @@ _PAYMENT_FIELD_HINTS = ("card", "cc-number", "ccnumber", "cvv", "cvc", "cardnumb
 _CRED_FIELD_HINTS = ("user", "email", "login", "username")
 _TITLE_SPLIT_RE = re.compile(r"\s*[-|:]{1,2}\s*|\s*—\s*")
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]")
+
+# Extensions with essentially no reason to be a direct download link outside
+# software-distribution intent. Deliberately small and unambiguous — this is
+# not a general "risky file type" list, just the classic malware-delivery set.
+_EXECUTABLE_EXTENSIONS = (
+    ".exe", ".scr", ".bat", ".cmd", ".msi", ".jar", ".apk", ".dmg",
+    ".vbs", ".ps1", ".jse", ".wsf",
+)
+_META_REFRESH_URL_RE = re.compile(r"url\s*=\s*(.+)$", re.IGNORECASE)
 
 
 class _SSRFError(Exception):
@@ -223,6 +232,8 @@ class _PageParser(HTMLParser):
         self.site_name = ""
         self.h1 = ""
         self.forms: list[_FormState] = []
+        self.meta_refresh_target = ""
+        self.download_links: list[str] = []
         self._current_form: Optional[_FormState] = None
         self._in_title = False
         self._in_h1 = False
@@ -238,6 +249,14 @@ class _PageParser(HTMLParser):
             prop = attrs_d.get("property", "").lower() or attrs_d.get("name", "").lower()
             if prop == "og:site_name":
                 self.site_name = attrs_d.get("content", "").strip()
+            elif attrs_d.get("http-equiv", "").lower() == "refresh" and not self.meta_refresh_target:
+                m = _META_REFRESH_URL_RE.search(attrs_d.get("content", ""))
+                if m:
+                    self.meta_refresh_target = m.group(1).strip().strip("'\"")
+        elif tag == "a":
+            href = attrs_d.get("href", "")
+            if href and href.split("?", 1)[0].split("#", 1)[0].lower().endswith(_EXECUTABLE_EXTENSIONS):
+                self.download_links.append(href)
         elif tag == "form":
             self._current_form = _FormState(
                 action=attrs_d.get("action", ""), method=attrs_d.get("method", "get").lower()
@@ -311,6 +330,7 @@ class PageCollector(EvidenceCollector):
 
         evidence.extend(self._redirect_evidence(entity, result, seed_host, final_host))
         evidence.extend(self._intent_evidence(entity, result.final_url or entity.value))
+        evidence.extend(self._structure_evidence(entity, entity.value))
 
         parser = _PageParser()
         try:
@@ -323,6 +343,8 @@ class PageCollector(EvidenceCollector):
         evidence.extend(
             self._brand_mismatch_evidence(entity, parser, final_host, has_credential_form=bool(cred_forms))
         )
+        evidence.extend(self._meta_refresh_evidence(entity, parser, result.final_url, final_host))
+        evidence.extend(self._download_evidence(entity, parser, result.final_url))
 
         return CollectorResult(evidence=evidence, available=True)
 
@@ -379,6 +401,34 @@ class PageCollector(EvidenceCollector):
             )
             for category, tokens in intents.items()
         ]
+
+    def _structure_evidence(self, entity: Entity, url: str) -> list[Evidence]:
+        """URL-shape deception, checked on the original seed URL. Independent of
+        whether the fetch itself succeeds or fails — but only reached from the
+        success path (see collect()) to keep the existing available=False
+        early-return contract on fetch failure unchanged."""
+        items: list[Evidence] = []
+        if is_ip_literal_host(url):
+            items.append(Evidence(
+                source=self.name, entity_id=entity.id, signal="ip_literal_host",
+                value=urlparse(url).hostname, evidence_type="behavior",
+                polarity=Polarity.SUPPORTS_THREAT, confidence=0.5,
+                independence=Independence.INDEPENDENT,
+                provenance=f"URL uses a literal IP address as its host: {urlparse(url).hostname}",
+            ))
+        if has_userinfo(url):
+            items.append(Evidence(
+                source=self.name, entity_id=entity.id, signal="url_userinfo_present",
+                value=urlparse(url).username, evidence_type="behavior",
+                polarity=Polarity.SUPPORTS_THREAT, confidence=0.6,
+                independence=Independence.INDEPENDENT,
+                provenance=(
+                    "URL embeds userinfo before the host — a deprecated feature with "
+                    "essentially no legitimate modern use, classically used to make an "
+                    "attacker's real host look like a path on the name before the '@'"
+                ),
+            ))
+        return items
 
     def _credential_evidence(
         self, entity: Entity, cred_forms: list[_FormState], final_url: str, final_host: str
@@ -444,4 +494,35 @@ class PageCollector(EvidenceCollector):
                 f"domain's own name ('{domain_label}')"
                 + (" and the page also collects credentials" if has_credential_form else "")
             ),
+        )]
+
+    def _meta_refresh_evidence(
+        self, entity: Entity, parser: _PageParser, final_url: str, final_host: str
+    ) -> list[Evidence]:
+        if not parser.meta_refresh_target:
+            return []
+        resolved = urljoin(final_url or entity.value, parser.meta_refresh_target)
+        target_host = urlparse(resolved).hostname or ""
+        cross_domain = bool(target_host) and bool(final_host) and not same_organization(target_host, final_host)
+        return [Evidence(
+            source=self.name, entity_id=entity.id, signal="meta_refresh_target",
+            value=resolved, evidence_type="behavior",
+            polarity=Polarity.SUPPORTS_THREAT if cross_domain else Polarity.NEUTRAL,
+            confidence=0.5 if cross_domain else 0.4,
+            independence=Independence.INDEPENDENT,
+            provenance=(
+                f"page contains a <meta http-equiv=\"refresh\"> redirect to {resolved}"
+                + (f", leaving {final_host} for a different organization's domain" if cross_domain else "")
+            ),
+        )]
+
+    def _download_evidence(self, entity: Entity, parser: _PageParser, final_url: str) -> list[Evidence]:
+        if not parser.download_links:
+            return []
+        resolved = sorted({urljoin(final_url or entity.value, href) for href in parser.download_links})
+        return [Evidence(
+            source=self.name, entity_id=entity.id, signal="executable_download",
+            value=resolved, evidence_type="behavior", polarity=Polarity.SUPPORTS_THREAT,
+            confidence=0.5, independence=Independence.INDEPENDENT,
+            provenance=f"page links directly to executable/script file(s): {', '.join(resolved[:3])}",
         )]

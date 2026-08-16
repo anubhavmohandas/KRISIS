@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import difflib
 import os
+import unicodedata
 from dataclasses import dataclass
 
 from .indicators import registrable_domain
@@ -113,6 +114,28 @@ def decode_idn(host: str) -> str:
     return ".".join(labels)
 
 
+def _char_script(ch: str) -> str:
+    """The Unicode script a letter belongs to, read off its character name —
+    'LATIN SMALL LETTER A' / 'CYRILLIC SMALL LETTER A' / 'GREEK SMALL LETTER
+    ALPHA' all start with the script name, which is enough to tell scripts
+    apart without a separate script-range table."""
+    name = unicodedata.name(ch, "")
+    return name.split(" ", 1)[0] if name else ""
+
+
+def mixed_script_label(label: str) -> bool:
+    """True if `label` mixes letters from more than one Unicode script.
+
+    The deceptive pattern is script *mixing within one label* (Latin 'p' next
+    to Cyrillic 'а'), not a label being written in a single non-Latin script.
+    A label entirely in Cyrillic, Greek, Arabic, Chinese, or anything else is
+    never flagged here just for not being Latin.
+    """
+    scripts = {_char_script(ch) for ch in label if ch.isalpha()}
+    scripts.discard("")
+    return len(scripts) > 1
+
+
 # An ambiguous glyph doubles the number of readings, so a label full of them would
 # explode combinatorially. The cap keeps the most likely readings and drops the rest.
 MAX_READINGS = 8
@@ -145,6 +168,23 @@ def _split(host: str) -> tuple[str, str]:
     registrable = registrable_domain(decode_idn(host))
     name, _, suffix = registrable.partition(".")
     return name, suffix
+
+
+def _subdomain_labels(host: str) -> list[str]:
+    """Labels in front of `host`'s own registrable domain — ['secure', 'paypal']
+    for 'secure.paypal.attacker.com' (registrable 'attacker.com'). Empty when
+    `host` *is* its own registrable domain.
+
+    Suffix-aware via registrable_domain() itself (handles 'bank.in', 'co.in',
+    ...) rather than a fixed label count, so this never miscounts a
+    multi-label public suffix as a subdomain.
+    """
+    decoded = decode_idn(host)
+    registrable = registrable_domain(decoded)
+    if not registrable or decoded.lower() == registrable.lower():
+        return []
+    prefix = decoded[: -(len(registrable) + 1)]
+    return [l for l in prefix.lower().split(".") if l]
 
 
 def label_similarity(a: str, b: str) -> float:
@@ -236,6 +276,7 @@ def candidates(host: str, references: set[str] | None = None) -> list[LookalikeC
             )
 
     # 3. known identities, which unlocks cross-TLD matches the above cannot see
+    subdomain_labels = [l for l in _subdomain_labels(host) if len(l) >= MIN_TOKEN_LENGTH]
     for reference in references or set():
         ref_name, ref_suffix = _split(reference)
         if not ref_name or not ref_suffix or (ref_name, ref_suffix) == (name, suffix):
@@ -258,6 +299,27 @@ def candidates(host: str, references: set[str] | None = None) -> list[LookalikeC
                     f"{ref_name}.{ref_suffix}", "reference_similarity",
                     f"'{name}' is {similarity:.0%} identical to the known identity "
                     f"'{ref_name}.{ref_suffix}'",
+                )
+
+        # A known identity placed as a *subdomain* label of an unrelated domain
+        # ('paypal.attacker.example', 'secure-paypal.attacker.example') is a
+        # distinct deceptive pattern from the registrable-label checks above —
+        # the artifact's own suffix has nothing to do with it, so this can only
+        # ever match a *known* reference, never guess a TLD to pair a bare
+        # subdomain label with.
+        for sub in subdomain_labels:
+            if canonical_label(sub) == canonical_label(ref_name):
+                offer(
+                    f"{ref_name}.{ref_suffix}", "confusable_characters",
+                    f"the subdomain label '{sub}' of '{host}' and the known identity "
+                    f"'{ref_name}.{ref_suffix}' are the same string once look-alike "
+                    f"characters are resolved",
+                )
+            elif sub == ref_name or any(t == ref_name for t in _core_tokens(sub)):
+                offer(
+                    f"{ref_name}.{ref_suffix}", "decoration_token",
+                    f"the subdomain label '{sub}' of '{host}' is the known identity "
+                    f"'{ref_name}' plus decoration wording (or exactly '{ref_name}')",
                 )
 
     return sorted(found.values(), key=lambda c: c.similarity, reverse=True)

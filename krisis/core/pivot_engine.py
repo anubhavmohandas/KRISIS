@@ -88,6 +88,7 @@ PIVOT_RULES: dict[str, tuple[EntityType, str, float, str]] = {
     "vt_related_domain": (EntityType.DOMAIN, "vt_related", 0.7, "VirusTotal reports a direct relationship"),
     "vt_communicating_ip": (EntityType.IP, "vt_related", 0.65, "VirusTotal reports this IP as related"),
     "redirect_target": (EntityType.URL, "redirects_to", 0.7, "observed redirect destination"),
+    "meta_refresh_target": (EntityType.URL, "redirects_to", 0.65, "meta-refresh redirect destination"),
     "lookalike_domain": (EntityType.DOMAIN, "looks_like", 0.6, "artifact resembles this established identity"),
 }
 

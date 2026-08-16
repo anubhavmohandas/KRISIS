@@ -36,6 +36,8 @@ from krisis.core.risk import RiskEngine
 
 REAL = "auroratech.com"           # the established identity being imitated
 FAKE = REAL.replace("o", "0", 1)  # aur0ratech.com — a glyph substitution
+FAKE_CYRILLIC = "aurоratech.com"      # aurоratech.com — Cyrillic 'о', in CONFUSABLE_CHARS
+FAKE_MIXED_SCRIPT = "falбconhub.example"  # falбconhub.example — Cyrillic 'б', NOT in CONFUSABLE_CHARS
 
 
 # -- shared fixture builders, mirroring real collector output shapes ----------
@@ -330,6 +332,98 @@ CASES: list[ValidationCase] = [
         coverage=Coverage(
             attempted={"dns", "virustotal"}, available={"dns"}, evidence_types={"infrastructure"},
         ),
+    ),
+    ValidationCase(
+        key="K_cyrillic_homoglyph_lookalike",
+        target=FAKE_CYRILLIC,
+        ground_truth="malicious — impersonation via a Cyrillic homoglyph, not just digit substitution",
+        why=(
+            "Every existing lookalike case above (B, B2, C, D, E) exercises digit "
+            "substitution (aur0ratech.com) only. This proves the same verified-"
+            "impersonation pathway — resolves, established, different operator — "
+            "also covers a genuine Unicode confusable character, end to end "
+            "through the real IdentityCollector, and that mixed_script_domain "
+            "correctly co-fires alongside it (the label mixes Latin and Cyrillic)."
+        ),
+        build=lambda: _identity_evidence(FAKE_CYRILLIC, {
+            FAKE_CYRILLIC: _whois_evidence("fake", ["203.0.113.9"], age_days=8, org="privacy service"),
+            REAL: _whois_evidence("real", ["198.51.100.4"], age_days=4000, org="auroratech inc"),
+        }) + [_clean_reputation()],
+        expected_categories=frozenset({RiskCategory.MEDIUM, RiskCategory.HIGH}),
+        expected_evidence=frozenset({"lookalike_domain", "mixed_script_domain"}),
+        expected_non_evidence=frozenset({"same_operator_variant"}),
+    ),
+    ValidationCase(
+        key="L_mixed_script_without_confusable_match",
+        target=FAKE_MIXED_SCRIPT,
+        ground_truth=(
+            "suspicious — script-mixed label with no verified referent; must not "
+            "read as looking safe, but must not be forced to the same floor as a "
+            "verified lookalike either"
+        ),
+        why=(
+            "Cyrillic 'б' is deliberately absent from identity.py's curated "
+            "CONFUSABLE_CHARS table, so the confusable-character mechanism alone "
+            "derives no lookalike candidate here at all — mixed_script_domain is "
+            "the only reason this scores above an ordinary domain. Also locks in "
+            "the LOW-band-floor fix made alongside this case: the uncertainty "
+            "reason must not claim this 'imitates an established identity "
+            "operated by someone else' the way a verified lookalike_domain does, "
+            "since mixed_script_domain names no referent at all."
+        ),
+        build=lambda: _identity_evidence(FAKE_MIXED_SCRIPT, {}) + [_clean_reputation()],
+        expected_categories=frozenset({RiskCategory.LOW, RiskCategory.MEDIUM}),
+        expected_evidence=frozenset({"mixed_script_domain"}),
+        expected_non_evidence=frozenset({"lookalike_domain"}),
+    ),
+    ValidationCase(
+        key="M_malware_delivery_ip_host_plus_executable_download",
+        target="http://user@203.0.113.7/setup.exe",
+        ground_truth=(
+            "malicious — malware delivery: deceptive URL shape serving a direct "
+            "executable from freshly-registered infrastructure"
+        ),
+        why=(
+            "No single signal here is unusual alone (a literal-IP host; a "
+            "userinfo trick; a downloadable file; a new domain) — together, on "
+            "infrastructure this fresh, they are the actual malware-delivery "
+            "pattern risk.py's second interaction rule "
+            "(INTERACTION_MALWARE_BONUS_POINTS) exists for, mirroring case D's "
+            "proof of the first interaction rule. ip_literal_host alone plus "
+            "executable_download alone, with nothing else corroborating (no "
+            "reputation flag, no registration signal), is deliberately left at "
+            "LOW by the same design that keeps a single flagged-but-uncorroborated "
+            "reputation hit weak on raw points alone (case I) — the interaction "
+            "bonus lifts a combination, it does not manufacture a floor from "
+            "thin air the way the reputation-flag and impersonation floors do "
+            "for their own, categorically different, kinds of evidence."
+        ),
+        build=lambda: [
+            _ev("ip_literal_host", "behavior", Polarity.SUPPORTS_THREAT, 0.5, "page"),
+            _ev("url_userinfo_present", "behavior", Polarity.SUPPORTS_THREAT, 0.6, "page"),
+            _ev("executable_download", "behavior", Polarity.SUPPORTS_THREAT, 0.5, "page"),
+            _ev("newly_registered_domain", "registration", Polarity.SUPPORTS_THREAT, 0.6, "whois", value=5),
+            _clean_reputation(),
+        ],
+        expected_categories=frozenset({RiskCategory.MEDIUM, RiskCategory.HIGH}),
+        expected_evidence=frozenset({"ip_literal_host", "executable_download"}),
+    ),
+    ValidationCase(
+        key="N_message_sender_url_domain_mismatch",
+        target="security@example-support.test / http://totally-different.example",
+        ground_truth="suspicious — message context: sender never links back to its own claimed domain",
+        why=(
+            "message_collector.py's new sender_url_domain_mismatch signal — "
+            "exercises the message-context pathway distinctly from artifact-level "
+            "findings, same separation of concerns rows E/F already establish for "
+            "urgency/credential-request signals."
+        ),
+        build=lambda: [
+            _ev("sender_url_domain_mismatch", "behavior", Polarity.SUPPORTS_THREAT, 0.4, "message"),
+            _clean_reputation(),
+        ],
+        expected_categories=frozenset({RiskCategory.LOW, RiskCategory.MEDIUM}),
+        expected_evidence=frozenset({"sender_url_domain_mismatch"}),
     ),
 ]
 

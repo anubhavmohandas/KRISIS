@@ -30,7 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from ..core.identity import LookalikeCandidate, candidates
+from ..core.identity import LookalikeCandidate, candidates, decode_idn, mixed_script_label
 from ..core.indicators import is_bank_in_namespace, registrable_domain
 from ..core.models import Entity, EntityType, Evidence, Independence, Polarity
 from .base import CollectorResult, EvidenceCollector
@@ -135,10 +135,11 @@ class IdentityCollector(EvidenceCollector):
         self.references = references or (lambda: set())
 
     def collect(self, entity: Entity) -> CollectorResult:
-        # Namespace context is evidence about this artifact's own domain, independent
-        # of whether it also happens to derive a lookalike candidate against someone
-        # else — so it is collected before, and regardless of, that derivation.
-        context = [self._bank_namespace_evidence(entity)]
+        # Namespace/script context is evidence about this artifact's own domain,
+        # independent of whether it also happens to derive a lookalike candidate
+        # against someone else — so it is collected before, and regardless of,
+        # that derivation.
+        context = [self._bank_namespace_evidence(entity), self._mixed_script_evidence(entity)]
         context = [ev for ev in context if ev is not None]
 
         try:
@@ -310,6 +311,30 @@ class IdentityCollector(EvidenceCollector):
                 f"RBI reserves for regulated banks and directed banks to migrate to in "
                 f"order to reduce digital-payment phishing — this supports the namespace's "
                 f"authenticity, not that this specific institution, page, or message is safe"
+            ),
+        )
+
+    def _mixed_script_evidence(self, entity: Entity) -> Optional[Evidence]:
+        """A label mixing Unicode scripts (Latin 'p' next to Cyrillic 'а') is a
+        deceptive-glyph pattern the confusable-character table won't always
+        catch on its own — it only maps a curated subset of homoglyphs, while
+        this catches script mixing generically. Never fires for a label
+        written entirely in one script, non-Latin included (see
+        identity.mixed_script_label).
+        """
+        labels = decode_idn(entity.value).split(".")
+        mixed = [label for label in labels if mixed_script_label(label)]
+        if not mixed:
+            return None
+        return Evidence(
+            source=self.name, entity_id=entity.id, signal="mixed_script_domain",
+            value=mixed, evidence_type="identity",
+            polarity=Polarity.SUPPORTS_THREAT, confidence=0.45,
+            independence=Independence.INDEPENDENT,
+            provenance=(
+                f"label(s) {mixed} of '{entity.value}' mix letters from more than one "
+                f"Unicode script — a common way to construct a visually deceptive glyph "
+                f"substitution not present in the curated confusable-character table"
             ),
         )
 

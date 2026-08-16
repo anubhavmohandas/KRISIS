@@ -10,6 +10,7 @@ about who registered it.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 from urllib.parse import urlparse
@@ -74,3 +75,30 @@ def classify(url: str) -> dict[str, list[str]]:
             if token not in bucket:
                 bucket.append(token)
     return found
+
+
+def is_ip_literal_host(url: str) -> bool:
+    """True if `url`'s host is a literal IP address rather than a domain name —
+    a classic way to dodge domain-based reputation/identity checks entirely."""
+    try:
+        host = urlparse(url).hostname
+    except Exception:
+        return False
+    if not host:
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def has_userinfo(url: str) -> bool:
+    """True if `url` embeds userinfo before the host ('https://paypal.com@evil.tld/') —
+    a deprecated URL feature with essentially no legitimate modern use, kept alive
+    almost exclusively to make an attacker's real host look like a path on the
+    brand named before the '@'."""
+    try:
+        return urlparse(url).username is not None
+    except Exception:
+        return False

@@ -467,8 +467,6 @@ weighting, provider budgeting, identity verification, and more).
 Carried forward from the current, honest README scope statement — not
 resolved or claimed resolved by this pass:
 
-- No URL-scanning/redirect-chain collector for the page-fetch half of a
-  credential-phishing shape; only the impersonation half is observable.
 - Referent *legitimacy* is not modeled — the identity layer verifies a
   referent is established and resolving, not that it is the "real" brand
   versus an older squatter.
@@ -497,10 +495,14 @@ Deliberately not built in this pass, per the acceptance scope:
 - Additional AI models beyond the single configured explanation model
 - Desktop UI, browser extension, or any collector unrelated to the
   existing investigation loop
-- A dedicated URL-scanning/page-render collector for the credential-
-  harvesting half of phishing detection
 - A `hypotheses`/`coverage` JSON schema expansion, if a future consumer
   actually needs it as its own field rather than derived from existing ones
+
+A later phishing-signal-coverage pass (`docs/PHISHING_SIGNAL_MATRIX.md`)
+audited and extended evidence coverage further — page/redirect, message,
+TLS, WHOIS, and identity signals beyond what CLI v1 shipped with. See that
+document and the updated `README.md` for what changed; this record is left
+as the CLI v1 snapshot it describes, not rewritten to include later work.
 
 ## 20. Why KRISIS is not merely a reputation-service wrapper
 

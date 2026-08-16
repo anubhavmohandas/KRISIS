@@ -96,6 +96,21 @@ INTERACTION_IMPERSONATION_SIGNALS = frozenset({"lookalike_domain", "brand_domain
 INTERACTION_CREDENTIAL_SIGNALS = frozenset({"credential_form"})
 INTERACTION_BONUS_POINTS = 14.0
 
+# Malware-delivery hypothesis: a deceptive URL shape (literal-IP host,
+# userinfo trick) plus a direct executable/script download is a materially
+# different hypothesis than credential phishing, and neither signal is
+# identity- or credential-form-shaped, so the existing bonus above can't
+# express it. Every other new signal this pass adds is deliberately left
+# out of any interaction rule — ordinary polarity/confidence/independence/
+# diversity scoring (plus the existing rule above, for anything
+# lookalike/credential-shaped) already expresses their combinations; a
+# bonus per signal pair would be exactly the "cluster of correlated
+# signals counted as independent confirmations" failure mode the scoring
+# design exists to avoid.
+INTERACTION_SUSPICIOUS_URL_SIGNALS = frozenset({"ip_literal_host", "url_userinfo_present"})
+INTERACTION_DOWNLOAD_SIGNALS = frozenset({"executable_download"})
+INTERACTION_MALWARE_BONUS_POINTS = 14.0
+
 
 def outcome_trust(prior_outcome: Optional[str]) -> float:
     return OUTCOME_TRUST.get(
@@ -179,11 +194,35 @@ NARROW_CONTRADICTIONS: dict[str, str] = {
         "a shared resolved address would, and an attacker can enter it just as "
         "easily as a genuine defensive registration can"
     ),
+    "certificate_subject_org_match": (
+        "a CA-vetted certificate subject organization confirms some real-world "
+        "entity controls this endpoint, not that this artifact isn't impersonating "
+        "a different organization elsewhere in its identity — a phishing site can "
+        "hold a legitimate OV/EV certificate for a shell company while still "
+        "imitating an unrelated brand's name"
+    ),
 }
 
 
 def _identity_support(supporting: list[Evidence]) -> list[Evidence]:
     return [ev for ev in supporting if ev.evidence_type == "identity"]
+
+
+# Signals whose .value names a *specific, verified* external referent this
+# artifact imitates — narrower than "any identity-type evidence" above.
+# lookalike_domain only reaches SUPPORTS_THREAT after identity_collector.py
+# verifies the referent resolves, is established, and belongs to someone else
+# — so its value can honestly be read as "an established identity operated by
+# someone else." Other identity-type signals (mixed_script_domain: a raw,
+# unverified anomaly about the artifact's *own* label, naming no referent at
+# all) must not be worded that way by the LOW-band floor below, even though
+# they still count as ordinary identity_support for the counter-evidence
+# discount above, where no referent-naming claim is being made.
+VERIFIED_REFERENT_SIGNALS = frozenset({"lookalike_domain"})
+
+
+def _verified_impersonation(supporting: list[Evidence]) -> list[Evidence]:
+    return [ev for ev in supporting if ev.signal in VERIFIED_REFERENT_SIGNALS]
 
 
 def _discount_narrow_contradictions(
@@ -259,11 +298,21 @@ class RiskEngine:
         if (supporting_signals & INTERACTION_IMPERSONATION_SIGNALS) and (
             supporting_signals & INTERACTION_CREDENTIAL_SIGNALS
         ):
-            interaction_points = INTERACTION_BONUS_POINTS
+            interaction_points += INTERACTION_BONUS_POINTS
             support_contributors.append((
-                interaction_points,
+                INTERACTION_BONUS_POINTS,
                 "combined brand-impersonation + credential-collection evidence "
                 "(stronger together than either alone)",
+            ))
+
+        if (supporting_signals & INTERACTION_SUSPICIOUS_URL_SIGNALS) and (
+            supporting_signals & INTERACTION_DOWNLOAD_SIGNALS
+        ):
+            interaction_points += INTERACTION_MALWARE_BONUS_POINTS
+            support_contributors.append((
+                INTERACTION_MALWARE_BONUS_POINTS,
+                "combined deceptive-URL-shape + direct executable/script download "
+                "(malware-delivery pattern, stronger together than either alone)",
             ))
 
         raw_score = support_points + historical_points + interaction_points - (0.5 * contra_points)
@@ -386,7 +435,7 @@ class RiskEngine:
         # name — the part a victim actually reads — and it does not need corroborating
         # infrastructure to matter. A lookalike domain reported as "looks safe" is the
         # exact failure that made paypa1.com score LOW/0 before identity analysis existed.
-        impersonation = _identity_support(correlation.supporting)
+        impersonation = _verified_impersonation(correlation.supporting)
         if impersonation:
             resembles = ", ".join(sorted({str(ev.value) for ev in impersonation}))
             uncertainty["reason"] = (

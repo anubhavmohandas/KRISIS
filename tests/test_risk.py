@@ -148,6 +148,32 @@ class TestSecuritySignalInteraction(unittest.TestCase):
         # bonus must not fire just because there happen to be two of them.
         self.assertLess(both_credential_signals - only_credential, 8)
 
+    def test_malware_delivery_signals_score_well_above_the_sum_of_the_parts(self):
+        """Second, independent interaction rule (risk.py::INTERACTION_MALWARE_BONUS_POINTS):
+        a deceptive URL shape plus a direct executable download is a materially
+        different hypothesis than credential phishing. Deleting that block should
+        make this test fail while every other test in this class keeps passing."""
+        suspicious_url = _ev("ip_literal_host", "behavior", Polarity.SUPPORTS_THREAT, confidence=0.5)
+        download = _ev("executable_download", "behavior", Polarity.SUPPORTS_THREAT, confidence=0.5)
+
+        only_url = self._score(suspicious_url)
+        only_download = self._score(download)
+        combined = self._score(suspicious_url, download)
+
+        self.assertGreaterEqual(combined - only_url - only_download, 8)
+
+    def test_executable_download_alone_does_not_trigger_the_malware_bonus(self):
+        only_download = self._score(
+            _ev("executable_download", "behavior", Polarity.SUPPORTS_THREAT, confidence=0.5)
+        )
+        download_plus_unrelated = self._score(
+            _ev("executable_download", "behavior", Polarity.SUPPORTS_THREAT, confidence=0.5, source="a"),
+            _ev("newly_registered_domain", "registration", Polarity.SUPPORTS_THREAT, confidence=0.6, source="b"),
+        )
+        # No deceptive-URL-shape signal present: the malware bonus must not fire
+        # just because there happen to be two supporting items.
+        self.assertLess(download_plus_unrelated - only_download, 8)
+
     def test_brand_domain_mismatch_does_not_inherit_the_verified_identity_carveout(self):
         """brand_domain_mismatch is an unverified page/domain-name comparison, not
         the verified (resolves + established + different-operator) relationship

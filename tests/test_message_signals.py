@@ -75,5 +75,50 @@ class TestMessageCollector(unittest.TestCase):
         self.assertNotIn("authentication_intent", signals)
 
 
+class TestSenderUrlMismatch(unittest.TestCase):
+    """Distinct from URL-path *intent* (see the test above): this compares the
+    sender's own domain against the domain(s) the message actually links to,
+    which is a different fact and does not double-count with PageCollector."""
+
+    def test_a_sender_that_never_links_back_to_its_own_domain_is_flagged(self):
+        text = (
+            "From: security@example-support.test\n\n"
+            "Please confirm your details at http://totally-different.test/login"
+        )
+        result = MessageCollector().collect(Entity(value=text, type=EntityType.MESSAGE))
+        signals = {e.signal: e for e in result.evidence}
+        self.assertIn("sender_url_domain_mismatch", signals)
+        self.assertEqual(signals["sender_url_domain_mismatch"].polarity, Polarity.SUPPORTS_THREAT)
+
+    def test_a_sender_that_links_back_to_its_own_domain_is_not_flagged(self):
+        text = (
+            "From: support@example.test\n\n"
+            "See your account at http://example.test/account for details."
+        )
+        result = MessageCollector().collect(Entity(value=text, type=EntityType.MESSAGE))
+        self.assertNotIn("sender_url_domain_mismatch", {e.signal for e in result.evidence})
+
+    def test_a_message_mentioning_an_unrelated_domain_in_passing_is_not_flagged(self):
+        """All-or-nothing check, not any-pairwise-mismatch: as long as *one*
+        mentioned link still shares the sender's domain, an ordinary message
+        that also references something else in passing must not fire."""
+        text = (
+            "From: support@example.test\n\n"
+            "As covered by news.test, see http://example.test/account for your statement."
+        )
+        result = MessageCollector().collect(Entity(value=text, type=EntityType.MESSAGE))
+        self.assertNotIn("sender_url_domain_mismatch", {e.signal for e in result.evidence})
+
+    def test_no_email_address_present_means_nothing_to_compare(self):
+        text = "Please confirm your details at http://totally-different.test/login"
+        result = MessageCollector().collect(Entity(value=text, type=EntityType.MESSAGE))
+        self.assertNotIn("sender_url_domain_mismatch", {e.signal for e in result.evidence})
+
+    def test_no_url_or_domain_present_means_nothing_to_compare(self):
+        text = "From: security@example-support.test\n\nPlease confirm your details by replying."
+        result = MessageCollector().collect(Entity(value=text, type=EntityType.MESSAGE))
+        self.assertNotIn("sender_url_domain_mismatch", {e.signal for e in result.evidence})
+
+
 if __name__ == "__main__":
     unittest.main()

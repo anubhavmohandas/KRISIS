@@ -19,7 +19,7 @@ from krisis.collectors.page_collector import (
     PageCollector, _check_hop, _SchemeError, _SSRFError, safe_fetch,
 )
 from krisis.core.models import Entity, EntityType, Polarity
-from krisis.core.url_intent import classify
+from krisis.core.url_intent import classify, has_userinfo, is_ip_literal_host
 
 
 def _public_addrinfo(*_a, **_kw):
@@ -80,6 +80,23 @@ class TestUrlIntentClassification(unittest.TestCase):
         # matching is on split segments, not substring search.
         found = classify("https://example.test/catalogins/item")
         self.assertEqual(found, {})
+
+
+class TestUrlStructureFunctions(unittest.TestCase):
+    def test_ip_literal_host_is_detected(self):
+        self.assertTrue(is_ip_literal_host("http://203.0.113.5/login"))
+
+    def test_ipv6_literal_host_is_detected(self):
+        self.assertTrue(is_ip_literal_host("http://[2001:db8::1]/login"))
+
+    def test_ordinary_domain_host_is_not_an_ip_literal(self):
+        self.assertFalse(is_ip_literal_host("https://example.test/login"))
+
+    def test_userinfo_before_host_is_detected(self):
+        self.assertTrue(has_userinfo("https://paypal.com@evil.test/login"))
+
+    def test_no_userinfo_is_the_ordinary_case(self):
+        self.assertFalse(has_userinfo("https://example.test/login"))
 
 
 class TestSSRFAndSchemeGuard(unittest.TestCase):
@@ -249,6 +266,101 @@ class TestBrandDomainMismatch(unittest.TestCase):
         self.assertIn("brand_domain_mismatch", signals)
         self.assertEqual(signals["brand_domain_mismatch"].polarity, Polarity.SUPPORTS_THREAT)
         self.assertEqual(signals["brand_domain_mismatch"].value, "GlorpTech")
+
+
+class TestStructureSignals(unittest.TestCase):
+    def test_ip_literal_host_is_reported_as_evidence(self):
+        result = _collect(
+            "http://203.0.113.5/login",
+            [_page("<html><head><title>Login</title></head><body></body></html>")],
+        )
+        signals = {e.signal: e for e in result.evidence}
+        self.assertIn("ip_literal_host", signals)
+        self.assertEqual(signals["ip_literal_host"].polarity, Polarity.SUPPORTS_THREAT)
+
+    def test_userinfo_trick_is_reported_as_evidence(self):
+        result = _collect(
+            "http://paypal.com@evil.test/login",
+            [_page("<html><head><title>Login</title></head><body></body></html>")],
+        )
+        signals = {e.signal: e for e in result.evidence}
+        self.assertIn("url_userinfo_present", signals)
+        self.assertEqual(signals["url_userinfo_present"].polarity, Polarity.SUPPORTS_THREAT)
+
+    def test_ordinary_url_reports_neither_structure_signal(self):
+        result = _collect(
+            "http://example.test/login",
+            [_page("<html><head><title>Login</title></head><body></body></html>")],
+        )
+        signals = {e.signal for e in result.evidence}
+        self.assertFalse(signals & {"ip_literal_host", "url_userinfo_present"})
+
+    def test_a_failed_fetch_still_reports_unavailable_not_partial_evidence(self):
+        """Regression guard: structure evidence is only computed in the fetch
+        success path (see page_collector.PageCollector.collect) — a connection
+        failure must keep returning available=False with zero evidence, not a
+        partial result carrying only the structure signals."""
+        import requests
+
+        with _mock_dns(), mock.patch("requests.get", side_effect=requests.ConnectionError("refused")):
+            result = _collect("http://203.0.113.5/login", [])
+        self.assertFalse(result.available)
+        self.assertEqual(result.evidence, [])
+
+
+class TestMetaRefreshRedirect(unittest.TestCase):
+    def test_a_cross_domain_meta_refresh_is_reported_as_supporting_evidence(self):
+        page = (
+            '<html><head><meta http-equiv="refresh" content="0;url=http://attacker.test/x">'
+            "</head><body></body></html>"
+        )
+        result = _collect("http://example.test/", [_page(page)])
+        signals = {e.signal: e for e in result.evidence}
+        self.assertIn("meta_refresh_target", signals)
+        self.assertEqual(signals["meta_refresh_target"].polarity, Polarity.SUPPORTS_THREAT)
+        self.assertEqual(signals["meta_refresh_target"].value, "http://attacker.test/x")
+
+    def test_a_same_site_meta_refresh_is_neutral(self):
+        page = (
+            '<html><head><meta http-equiv="refresh" content="0;url=/next-page">'
+            "</head><body></body></html>"
+        )
+        result = _collect("http://example.test/start", [_page(page)])
+        signals = {e.signal: e for e in result.evidence}
+        self.assertIn("meta_refresh_target", signals)
+        self.assertEqual(signals["meta_refresh_target"].polarity, Polarity.NEUTRAL)
+
+    def test_no_meta_refresh_tag_emits_no_evidence(self):
+        result = _collect("http://example.test/", [_page("<html><body>plain page</body></html>")])
+        self.assertNotIn("meta_refresh_target", {e.signal for e in result.evidence})
+
+
+class TestExecutableDownload(unittest.TestCase):
+    def test_an_executable_link_is_reported_as_supporting_evidence(self):
+        page = '<html><body><a href="/files/invoice.exe">Download</a></body></html>'
+        result = _collect("http://example.test/", [_page(page)])
+        signals = {e.signal: e for e in result.evidence}
+        self.assertIn("executable_download", signals)
+        self.assertEqual(signals["executable_download"].polarity, Polarity.SUPPORTS_THREAT)
+        self.assertIn("http://example.test/files/invoice.exe", signals["executable_download"].value)
+
+    def test_an_ordinary_document_link_is_not_flagged(self):
+        page = '<html><body><a href="/files/invoice.pdf">Download</a></body></html>'
+        result = _collect("http://example.test/", [_page(page)])
+        self.assertNotIn("executable_download", {e.signal for e in result.evidence})
+
+    def test_a_query_string_trailing_a_real_executable_path_is_still_detected(self):
+        page = '<html><body><a href="/files/invoice.exe?id=1">Download</a></body></html>'
+        result = _collect("http://example.test/", [_page(page)])
+        self.assertIn("executable_download", {e.signal for e in result.evidence})
+
+    def test_an_extension_only_inside_a_query_value_is_not_a_direct_download_link(self):
+        # The path itself is "/get" — "payload.exe" only appears as a query
+        # *value*, not as the literal linked file, so this is not the same
+        # deterministic signal as an actual executable path.
+        page = '<html><body><a href="/get?file=payload.exe&id=1">Download</a></body></html>'
+        result = _collect("http://example.test/", [_page(page)])
+        self.assertNotIn("executable_download", {e.signal for e in result.evidence})
 
 
 if __name__ == "__main__":
