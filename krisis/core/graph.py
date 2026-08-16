@@ -9,10 +9,24 @@ keeping the Relationship.reason and evidence_ids attached to every edge.
 
 from __future__ import annotations
 
+import io
 from collections import defaultdict
 from typing import Iterable, Optional
 
 from .models import Entity, EntityType, Relationship
+
+# Fixed categorical order (dataviz skill palette) so an entity type always maps
+# to the same color across every render, regardless of what else is in frame.
+# Types past the 8th fold into _OTHER_COLOR rather than cycling the palette.
+_NODE_PALETTE = [
+    "#2a78d6", "#eb6834", "#1baf7a", "#eda100",
+    "#e87ba4", "#008300", "#4a3aa7", "#e34948",
+]
+_OTHER_COLOR = "#898781"
+_EDGE_COLOR = "#c3c2b7"
+_INK = "#0b0b0b"
+_MUTED_INK = "#52514e"
+_SURFACE = "#fcfcfb"
 
 
 class EntityGraph:
@@ -172,3 +186,142 @@ class EntityGraph:
             walk(r, "", True, 0)
 
         return "\n".join(lines) if lines else "(empty graph)"
+
+    def to_image(self, root_id: Optional[str] = None) -> io.BytesIO:
+        """Render an actual node-link diagram (boxes + labeled arrows) via matplotlib.
+
+        Uses the same layered, depth-based layout as to_ascii() — one row per
+        depth, same traversal order — just drawn instead of indented. Returns a
+        PNG in a BytesIO buffer (embeddable directly in the PDF report, or
+        written to disk by the caller).
+        """
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            from matplotlib.lines import Line2D
+            from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
+        except ImportError as exc:
+            raise RuntimeError("matplotlib is required to render a graph image; pip install matplotlib") from exc
+
+        roots = [root_id] if root_id else [
+            e.id for e in self._entities.values() if e.depth == 0
+        ]
+        if not roots:
+            roots = list(self._entities.keys())[:1]
+
+        rows: dict[int, list[str]] = defaultdict(list)
+        edges: list[tuple[str, str, str]] = []
+        visited: set[str] = set()
+
+        def walk(eid: str, depth: int) -> None:
+            if eid in visited or eid not in self._entities:
+                return
+            visited.add(eid)
+            rows[depth].append(eid)
+            for rel_id in self._out_edges.get(eid, []):
+                rel = self._relationships[rel_id]
+                target_id = rel.target_entity_id
+                if target_id not in visited and target_id in self._entities:
+                    edges.append((eid, target_id, rel.relation_type))
+                    walk(target_id, depth + 1)
+
+        for r in roots:
+            walk(r, 0)
+
+        buf = io.BytesIO()
+        if not visited:
+            fig, ax = plt.subplots(figsize=(6, 1.6))
+            ax.text(0.5, 0.5, "(empty graph)", ha="center", va="center", fontsize=12, color=_MUTED_INK)
+            ax.axis("off")
+            fig.savefig(buf, format="png", dpi=150, facecolor=_SURFACE)
+            plt.close(fig)
+            buf.seek(0)
+            return buf
+
+        # Uniform 1-unit spacing between siblings in every row (centered under
+        # the widest row) — a fixed slot count/(n+1) spacing compresses a
+        # near-full row until its node boxes touch.
+        max_width = max(len(ids) for ids in rows.values())
+        positions: dict[str, tuple[float, float]] = {}
+        for depth, ids in rows.items():
+            offset = (max_width - len(ids)) / 2
+            for i, eid in enumerate(ids):
+                positions[eid] = (offset + i + 1, -depth)
+
+        n_rows = max(rows.keys()) + 1
+        fig_w = min(28, max(6, max_width * 1.6))
+        fig_h = min(20, max(3.2, n_rows * 1.7))
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+        # Transparent figure background, opaque axes background: the axes patch
+        # only spans the tight ylim set below, so savefig(bbox_inches="tight")
+        # crops to that plus the legend — a painted *figure* background would
+        # cover the whole canvas and defeat that crop, leaving dead margin.
+        fig.patch.set_alpha(0)
+        ax.set_facecolor(_SURFACE)
+
+        # Keyed and ordered by EntityType's own declared order (not the visited
+        # set's arbitrary iteration order), so the legend lists types the same
+        # way on every render.
+        node_color: dict[EntityType, str] = {}
+        for etype in EntityType:
+            slot = list(EntityType).index(etype)
+            if any(self._entities[eid].type == etype for eid in visited):
+                node_color[etype] = _NODE_PALETTE[slot] if slot < len(_NODE_PALETTE) else _OTHER_COLOR
+
+        # occam: edge labels are placed by a fixed offset, not true collision
+        # avoidance — two same-named relations fanning from one parent to close
+        # siblings can still overlap. Upgrade to adjustText (or similar) if dense
+        # fan-out graphs make this common in practice.
+        for parent, child, relation in edges:
+            x1, y1 = positions[parent]
+            x2, y2 = positions[child]
+            ax.add_patch(FancyArrowPatch(
+                (x1, y1), (x2, y2), arrowstyle="-|>", mutation_scale=12,
+                color=_EDGE_COLOR, linewidth=1.4, zorder=1,
+                connectionstyle="arc3,rad=0.08", shrinkA=18, shrinkB=18,
+            ))
+            # Placed 62% of the way to the child rather than at the midpoint: near a
+            # parent with several children, sibling edges have barely fanned apart at
+            # the midpoint, so labels there collide.
+            t = 0.62
+            mx, my = x1 + (x2 - x1) * t, y1 + (y2 - y1) * t
+            ax.text(mx, my, relation, fontsize=7, color=_MUTED_INK, ha="center", va="center",
+                    bbox=dict(boxstyle="round,pad=0.15", fc=_SURFACE, ec="none"), zorder=2)
+
+        for eid in visited:
+            entity = self._entities[eid]
+            x, y = positions[eid]
+            color = node_color[entity.type]
+            label = entity.value if len(entity.value) <= 22 else entity.value[:19] + "..."
+            ax.add_patch(FancyBboxPatch(
+                (x - 0.42, y - 0.16), 0.84, 0.32,
+                boxstyle="round,pad=0.02,rounding_size=0.06",
+                linewidth=1.4, edgecolor=color, facecolor="white", zorder=3,
+            ))
+            ax.text(x, y + 0.055, entity.type.value, fontsize=7, color=color, weight="bold",
+                    ha="center", va="center", zorder=4)
+            ax.text(x, y - 0.075, label, fontsize=8, color=_INK, ha="center", va="center", zorder=4)
+
+        legend_handles = [
+            Line2D([0], [0], marker="s", linestyle="", markersize=10,
+                   markerfacecolor="white", markeredgecolor=color, markeredgewidth=1.6, label=etype.value)
+            for etype, color in node_color.items()
+        ]
+        # Figure-level (not axes-level) legend, anchored above the axes box rather
+        # than inside its data range — otherwise the y-limits need dead space
+        # reserved above row 0 just to give the legend somewhere to sit.
+        legend = fig.legend(handles=legend_handles, loc="upper center", bbox_to_anchor=(0.5, 1.02),
+                             ncol=min(len(legend_handles), 6), frameon=False, fontsize=8)
+
+        # Padded tightly to the node boxes, not just given round numbers: the axes
+        # facecolor rectangle paints its full ylim span, so any extra padding here
+        # shows up as literal dead space above/below the graph in the saved PNG.
+        ax.set_xlim(-0.5, max_width + 0.5)
+        ax.set_ylim(-(n_rows - 1) - 0.24, 0.24)
+        ax.axis("off")
+        fig.savefig(buf, format="png", dpi=150, transparent=True,
+                    bbox_inches="tight", bbox_extra_artists=[legend])
+        plt.close(fig)
+        buf.seek(0)
+        return buf

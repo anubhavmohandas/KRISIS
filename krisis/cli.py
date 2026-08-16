@@ -159,7 +159,7 @@ _COMMON_OPTIONS = {
     ),
     "SHOW": (
         "--show-graph", "--show-evidence", "--show-pivots", "--show-patterns",
-        "--explain", "--json", "--verbose",
+        "--explain", "--json", "--pdf", "--output", "--verbose",
     ),
 }
 
@@ -215,6 +215,7 @@ _EXAMPLES_EPILOG = click.style("Examples:", fg="cyan", bold=True) + "\n\n\b\n" +
         "krisis investigate --hash <sha256>",
         "krisis cases",
         "krisis show <case_id> --verbose",
+        "krisis show <case_id> --pdf",
         "krisis outcome <case_id> confirmed_malicious",
         "krisis setup",
     )
@@ -517,18 +518,30 @@ def cases(db_path, limit):
 @click.option("--verbose", is_flag=True, help="Show everything (graph, evidence, pivots, patterns).")
 @click.option("--db", "db_path", default=DEFAULT_DB_PATH, show_default=True)
 @click.option("--json", "as_json", is_flag=True, help="Print the full stored case as JSON.")
-def show(case_id, show_graph, show_evidence, show_pivots, show_patterns, explain_only, verbose, db_path, as_json):
+@click.option("--pdf", "as_pdf", is_flag=True,
+              help="Export the case as a professional PDF report instead of printing it.")
+@click.option("--output", "output_path", type=click.Path(),
+              help="PDF output path (with --pdf). Default: ./reports/<case_id>.pdf")
+def show(case_id, show_graph, show_evidence, show_pivots, show_patterns, explain_only, verbose, db_path,
+         as_json, as_pdf, output_path):
     """Show a previously stored investigation (see `krisis cases` for ids).
 
     `krisis cases` only ever printed one summary line per case — there was no way
     to look back at what an old investigation actually found. This replays it from
     what was stored: risk, evidence, provider usage, graph, and the explanation.
     It never re-runs collection — everything shown comes from the stored case.
+    `--pdf` renders the same stored case as a case report file instead of text.
     """
     data = Storage(db_path).get_case(case_id)
     if not data:
         click.secho(f"[-] No such case: {case_id}", fg="red")
         sys.exit(1)
+    if as_pdf:
+        from .pdf_report import generate_pdf
+        path = generate_pdf(data, output_path)
+        click.secho("[+] Case report exported:", fg="cyan")
+        click.echo(f"    {path}")
+        return
     if as_json:
         click.echo(json.dumps(data, indent=2, default=str))
         return

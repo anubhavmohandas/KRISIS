@@ -295,6 +295,10 @@ class Case:
     pattern_matches: list[dict[str, Any]] = field(default_factory=list)
     risk: Optional[RiskAssessment] = None
     explanation: str = ""
+    # "ai" if the NVIDIA model produced `explanation`, "deterministic" if the
+    # template fallback did (no key configured, or the call failed). Lets a
+    # report label the explanation truthfully without re-deriving it.
+    explanation_source: str = "deterministic"
     recommendation: str = ""
     outcome: Optional[str] = None    # an Outcome value, or None while never validated
     # A provider that ran and could not answer (outage, timeout, error response).
@@ -321,6 +325,7 @@ class Case:
             "pattern_matches": self.pattern_matches,
             "risk": self.risk.to_dict() if self.risk else None,
             "explanation": self.explanation,
+            "explanation_source": self.explanation_source,
             "recommendation": self.recommendation,
             "outcome": self.outcome,
             "provider_failures": self.provider_failures,

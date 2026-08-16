@@ -6,6 +6,7 @@ requires-python = ">=3.10"
 dependencies = [
     "click>=8.1",
     "requests>=2.31",
+    "fpdf2>=2.7",
 ]
 
 [project.optional-dependencies]
@@ -15,8 +16,13 @@ collectors = [
     "ipwhois>=1.2",
     "pyOpenSSL>=23.0",
 ]
+# PDF report graph diagram — falls back to a text tree if missing.
+graph = [
+    "matplotlib>=3.7",
+]
 dev = [
     "pytest>=8",
+    "pypdf>=4",   # PDF-report tests read back generated PDF text to assert on content
 ]
 
 [project.scripts]

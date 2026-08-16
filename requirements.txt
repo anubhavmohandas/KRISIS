@@ -1,9 +1,13 @@
 # Core (required)
 click>=8.1
 requests>=2.31
+fpdf2>=2.7
 
 # Collectors (optional but recommended — each degrades gracefully if missing)
 dnspython>=2.4
 python-whois>=0.9
 ipwhois>=1.2
 pyOpenSSL>=23.0
+
+# PDF report graph diagram (optional — falls back to a text tree if missing)
+matplotlib>=3.7

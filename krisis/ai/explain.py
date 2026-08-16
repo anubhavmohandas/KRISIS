@@ -67,12 +67,18 @@ class Explainer:
         self.api_key = resolve("NVIDIA_API_KEY")
         self.model = model
         self.use_llm = use_llm and bool(self.api_key)
+        self.last_source = "deterministic"
 
     def explain(self, case: Case, graph: EntityGraph, correlation: CorrelationResult) -> str:
+        # Recorded so a downstream consumer (the PDF report) can label the stored
+        # explanation "plain-language" vs "deterministic" truthfully instead of
+        # guessing from whether NVIDIA_API_KEY happens to be configured now.
         if self.use_llm:
             model_result = self._explain_with_model(case, correlation)
             if model_result:
+                self.last_source = "ai"
                 return model_result
+        self.last_source = "deterministic"
         return self._explain_with_template(case, correlation)
 
     # -- deterministic fallback / default ------------------------------------
