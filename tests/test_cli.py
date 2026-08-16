@@ -100,8 +100,9 @@ class TestShowCommand(unittest.TestCase):
         self.assertIn("test explanation", result.output)
         self.assertIn("test recommendation", result.output)
         # The discounted-counter-evidence note must survive a round trip through
-        # storage exactly like it does for a just-completed investigation.
-        self.assertIn("does not offset the identity finding", result.output)
+        # storage exactly like it does for a just-completed investigation. Line-wrapped
+        # output can hard-wrap inside the phrase, so compare with whitespace collapsed.
+        self.assertIn("does not offset the identity finding", " ".join(result.output.split()))
 
     def test_show_json_round_trips_the_stored_case(self):
         case_id = _stored_case_id(self.db_path)
@@ -128,7 +129,7 @@ class TestShowCommand(unittest.TestCase):
         case_id = _stored_case_id(self.db_path)
         result = self._invoke("show", case_id, "--db", self.db_path, "--show-evidence")
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("--- Evidence ---", result.output)
+        self.assertIn("Evidence", result.output)
         self.assertIn("lookalike_domain", result.output)
         self.assertIn("valid_tls_present", result.output)
 
@@ -136,7 +137,7 @@ class TestShowCommand(unittest.TestCase):
         case_id = _stored_case_id(self.db_path)
         result = self._invoke("show", case_id, "--db", self.db_path, "--show-pivots")
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("--- Pivots ---", result.output)
+        self.assertIn("Pivots", result.output)
         self.assertIn("203.0.113.9", result.output)
         self.assertIn("accepted", result.output)
 
@@ -151,13 +152,54 @@ class TestShowCommand(unittest.TestCase):
         case_id = _stored_case_id(self.db_path)
         result = self._invoke("show", case_id, "--db", self.db_path, "--verbose")
         self.assertEqual(result.exit_code, 0)
-        for heading in ("Investigation Graph", "--- Evidence ---", "--- Pivots ---", "Historical Pattern Matches"):
+        for heading in ("Investigation Graph", "Evidence", "Pivots", "Historical Pattern Matches"):
             self.assertIn(heading, result.output)
 
     def test_show_unknown_case_fails_clearly(self):
         result = self._invoke("show", "case_does_not_exist", "--db", self.db_path)
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("No such case", result.output)
+
+    def test_show_distinguishes_skipped_from_unavailable_providers(self):
+        """A deliberately skipped provider request must never render under
+        'evidence source(s) unavailable' — that heading is for providers that
+        actually ran and failed. investigate and show share one renderer
+        (_render_provider_failures), so this covers both surfaces."""
+        case_id = _stored_case_id(self.db_path)
+        storage = Storage(self.db_path)
+        data = storage.get_case(case_id)
+        data["provider_failures"] = ["tls unavailable for netflix-login.example: timeout"]
+        data["provider_skips"] = ["virustotal skipped for netflix-login.example: daily budget exhausted"]
+        storage.save_case(data)
+
+        result = self._invoke("show", case_id, "--db", self.db_path)
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("1 evidence source(s) unavailable", result.output)
+        self.assertIn("tls unavailable for netflix-login.example: timeout", result.output)
+        self.assertIn("1 provider request(s) deliberately skipped", result.output)
+        self.assertIn("virustotal skipped for netflix-login.example: daily budget exhausted", result.output)
+
+        # the skip must not be counted or listed under the failure heading
+        unavailable_section = result.output.split("evidence source(s) unavailable")[1]
+        unavailable_section = unavailable_section.split("provider request(s) deliberately skipped")[0]
+        self.assertNotIn("virustotal", unavailable_section)
+
+    def test_show_json_keeps_skips_and_failures_as_distinct_lists(self):
+        case_id = _stored_case_id(self.db_path)
+        storage = Storage(self.db_path)
+        data = storage.get_case(case_id)
+        data["provider_failures"] = ["tls unavailable for netflix-login.example: timeout"]
+        data["provider_skips"] = ["virustotal skipped for netflix-login.example: daily budget exhausted"]
+        storage.save_case(data)
+
+        result = self._invoke("show", case_id, "--db", self.db_path, "--json")
+        self.assertEqual(result.exit_code, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["provider_failures"], ["tls unavailable for netflix-login.example: timeout"])
+        self.assertEqual(
+            payload["provider_skips"],
+            ["virustotal skipped for netflix-login.example: daily budget exhausted"],
+        )
 
 
 if __name__ == "__main__":

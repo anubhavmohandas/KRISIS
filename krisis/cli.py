@@ -29,6 +29,7 @@ from .core.graph import EntityGraph
 from .core.investigator import Investigator
 from .core.models import Outcome, RiskCategory
 from .core.recommend import INDECISIVE
+from .core.risk import historical_match_label
 from .memory.case_memory import CaseMemory
 from .memory.pattern_memory import PatternMemory
 from .memory.storage import DEFAULT_DB_PATH, Storage
@@ -58,21 +59,22 @@ def _gradient(art: str) -> str:
     )
 
 
-def _print_banner() -> None:
-    """Startup banner, written to stderr so `--json` stdout stays pipeable."""
-    click.echo("\n" + _gradient(_BANNER), err=True)
+def _print_banner(err: bool = True) -> None:
+    """Startup banner. Defaults to stderr so `--json` stdout stays pipeable;
+    help screens pass err=False since they have no machine output to protect."""
+    click.echo("\n" + _gradient(_BANNER), err=err)
     click.secho(
         "   🔎 Knowledge-Driven Risk Intelligence  ·  Evidence · Correlation · Risk · Memory",
-        dim=True, err=True,
+        dim=True, err=err,
     )
-    click.echo(err=True)
+    click.echo(err=err)
     click.echo(
         click.style("  ─────────────◇  ", fg=39)
         + click.style("A N U B H A V   M O H A N D A S", fg=51, bold=True)
         + click.style("  ◇─────────────", fg=39),
-        err=True,
+        err=err,
     )
-    click.echo(err=True)
+    click.echo(err=err)
 
 
 _CATEGORY_COLOR = {
@@ -84,6 +86,116 @@ _CATEGORY_COLOR = {
     RiskCategory.CONFLICTING_EVIDENCE: "bright_yellow",
     RiskCategory.UNKNOWN: "white",
 }
+
+
+# -- colorized help ---------------------------------------------------------
+#
+# click's HelpFormatter measures column widths via term_len(), which strips
+# ANSI escapes before counting — so styled text lines up exactly like plain
+# text would. That means every heading/flag/command name below can carry
+# color for free, with no custom table layout needed.
+
+def _section(title: str) -> None:
+    """Colored header for an output block, replacing the old plain '--- X ---'."""
+    click.echo()
+    click.secho(title, fg="bright_cyan", bold=True)
+    click.secho("─" * len(title), fg="bright_black")
+
+
+def _echo_wrapped(text: str, prefix: str, *, fg: str | None = None, width: int = 70) -> None:
+    """Word-wrap free-form text under a label, continuation lines hang-indented to
+    align under it — the pattern _render_provider_usage already used for skip
+    reasons, reused everywhere else a long line (evidence note, explanation,
+    historical match) would otherwise spill raw past the terminal edge."""
+    if not text:
+        return
+    pad = " " * len(prefix)
+    for i, line in enumerate(click.wrap_text(text, width=width).splitlines()):
+        click.secho(f"{prefix if i == 0 else pad}{line}", fg=fg)
+
+
+def _truncate(text: str, width: int) -> str:
+    """Ellipsize instead of letting a long field (e.g. a phishing message used
+    as the seed) blow past its column and wreck every row's alignment."""
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+class _ColorFormatter(click.HelpFormatter):
+    def write_usage(self, prog: str, args: str = "", prefix: str | None = None) -> None:
+        super().write_usage(prog, args, prefix=click.style("Usage", fg="cyan", bold=True) + ": ")
+
+    def write_heading(self, heading: str) -> None:
+        self.write(f"{'':>{self.current_indent}}{click.style(heading + ':', fg='cyan', bold=True)}\n")
+
+
+class _KrisisContext(click.Context):
+    formatter_class = _ColorFormatter
+
+
+class _KrisisCommand(click.Command):
+    """Colorizes flag names in the Options table; every subcommand uses this."""
+
+    context_class = _KrisisContext
+
+    def format_options(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        opts = []
+        for param in self.get_params(ctx):
+            rv = param.get_help_record(ctx)
+            if rv is not None:
+                name, help_text = rv
+                opts.append((click.style(name, fg="green"), help_text))
+        if opts:
+            with formatter.section("Options"):
+                formatter.write_dl(opts)
+
+
+class _KrisisGroup(_KrisisCommand, click.Group):
+    """Top-level `krisis` group: banner + colorized, untruncated command list."""
+
+    def format_options(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        _KrisisCommand.format_options(self, ctx, formatter)
+        self.format_commands(ctx, formatter)
+
+    def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        commands = []
+        for name in self.list_commands(ctx):
+            cmd = self.get_command(ctx, name)
+            if cmd is None or cmd.hidden:
+                continue
+            commands.append((name, cmd))
+        if not commands:
+            return
+        # limit=300 disables get_short_help_str's "..." truncation for any
+        # one-line docstring realistic here — the full description shows,
+        # wrapped by write_dl instead of cut short.
+        rows = [
+            (click.style(name, fg="cyan", bold=True), cmd.get_short_help_str(limit=300))
+            for name, cmd in commands
+        ]
+        with formatter.section("Commands"):
+            formatter.write_dl(rows)
+
+    def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        _print_banner(err=False)
+        super().format_help(ctx, formatter)
+
+
+_EXAMPLES_EPILOG = click.style("Examples:", fg="cyan", bold=True) + "\n\n\b\n" + "\n".join(
+    click.style("  " + line, fg="bright_black")
+    for line in (
+        "krisis investigate xyz.com",
+        "krisis investigate xyz.com --show-graph --show-evidence",
+        "krisis investigate message.txt --file",
+        "krisis investigate --hash <sha256>",
+        "krisis cases",
+        "krisis show <case_id> --verbose",
+        "krisis outcome <case_id> confirmed_malicious",
+        "krisis setup",
+    )
+) + "\n\n" + click.style(
+    "Each command has its own flags (e.g. --explain, --show-graph, --json) — "
+    "run `krisis COMMAND --help` to see them.", fg="bright_black"
+)
 
 
 # -- credential onboarding -----------------------------------------------------
@@ -182,11 +294,11 @@ def _render_source_status() -> None:
     sources = [s for s in credentials.PROVIDER_KEYS if s.is_evidence_source]
     others = [s for s in credentials.PROVIDER_KEYS if not s.is_evidence_source]
 
-    click.echo("\n--- Optional evidence sources ---")
+    _section("Optional evidence sources")
     for spec in sources:
         click.echo(f"  {spec.label:<34} {_status_for(spec)}")
     if others:
-        click.echo("\n--- Optional components (not evidence sources) ---")
+        _section("Optional components (not evidence sources)")
         for spec in others:
             click.echo(f"  {spec.label:<34} {_status_for(spec)}")
 
@@ -211,13 +323,19 @@ def _build_investigator(db_path: str, max_depth: int, max_entities: int, max_ext
     )
 
 
-@click.group()
-def cli():
+@click.group(cls=_KrisisGroup, invoke_without_command=True, epilog=_EXAMPLES_EPILOG)
+@click.pass_context
+def cli(ctx: click.Context) -> None:
     """KRISIS — Knowledge-driven Risk Intelligence & Security Investigation System."""
+    if ctx.invoked_subcommand is None:
+        # Bare `krisis`: show the same colorized help --help gives, on stdout
+        # with a clean exit — not click's default stderr "Missing command" error.
+        click.echo(ctx.get_help())
+        ctx.exit()
     _print_banner()
 
 
-@cli.command()
+@cli.command(cls=_KrisisCommand)
 @click.argument("target")
 @click.option("--file", "is_file", is_flag=True, help="Treat TARGET as a path to a message/text file to investigate.")
 @click.option("--hash", "is_hash", is_flag=True, help="Treat TARGET as a file hash (sha256/sha1/md5).")
@@ -288,16 +406,12 @@ def investigate(
 
     _render_provider_usage(case.provider_usage)
     _render_source_status()
-
-    if case.provider_failures:
-        click.secho(f"\n[!] {len(case.provider_failures)} evidence source(s) unavailable:", fg="yellow")
-        for note in case.provider_failures:
-            click.echo(f"    - {note}")
+    _render_provider_failures(case.provider_failures, case.provider_skips)
 
     click.secho(f"\n[+] Case stored: {case.id}", fg="cyan")
 
 
-@cli.command()
+@cli.command(cls=_KrisisCommand)
 @click.option("--provider", help="Configure only this provider (e.g. virustotal, anthropic).")
 @click.option("--reset", is_flag=True, help="Re-ask about keys you previously skipped.")
 @click.option("--show", is_flag=True, help="Show which keys are configured, without changing anything.")
@@ -341,7 +455,7 @@ def setup(provider, reset, show):
     _render_source_status()
 
 
-@cli.command()
+@cli.command(cls=_KrisisCommand)
 @click.option("--db", "db_path", default=DEFAULT_DB_PATH, show_default=True)
 @click.option("--limit", default=20, show_default=True)
 def cases(db_path, limit):
@@ -351,16 +465,21 @@ def cases(db_path, limit):
     if not rows:
         click.echo("No cases stored yet.")
         return
+    click.secho(
+        f"  {'ID':<18} {'CREATED':<20} {'SEED':<32} {'RISK':<16} OUTCOME",
+        fg="bright_black", bold=True,
+    )
     for row in rows:
         color = _CATEGORY_COLOR.get(RiskCategory(row["risk_category"]), "white") if row["risk_category"] else "white"
+        risk_text = f"{row['risk_category'] or 'N/A'} ({row['risk_score']})"
         click.echo(
-            f"{row['id']}  {row['created_at'][:19]}  {row['seed']:<30} "
-            + click.style(f"{row['risk_category'] or 'N/A'} ({row['risk_score']})", fg=color)
-            + f"  outcome={row['outcome'] or '-'}"
+            f"  {row['id']:<18} {row['created_at'][:19]:<20} {_truncate(row['seed'], 32):<32} "
+            + click.style(f"{risk_text:<16}", fg=color)
+            + f" {row['outcome'] or '-'}"
         )
 
 
-@cli.command()
+@cli.command(cls=_KrisisCommand)
 @click.argument("case_id")
 @click.option("--show-graph", is_flag=True, help="Print the investigation graph as ASCII.")
 @click.option("--show-evidence", is_flag=True, help="Print all collected evidence.")
@@ -405,17 +524,12 @@ def show(case_id, show_graph, show_evidence, show_pivots, show_patterns, explain
             _render_graph(graph)
 
     _render_provider_usage(data.get("provider_usage") or {})
-
-    failures = data.get("provider_failures") or []
-    if failures:
-        click.secho(f"\n[!] {len(failures)} evidence source(s) unavailable:", fg="yellow")
-        for note in failures:
-            click.echo(f"    - {note}")
+    _render_provider_failures(data.get("provider_failures") or [], data.get("provider_skips") or [])
 
     click.secho(f"\n[case: {data['id']}, seed: {data['seed']}]", fg="bright_black")
 
 
-@cli.command()
+@cli.command(cls=_KrisisCommand)
 @click.argument("case_id")
 @click.argument("outcome", type=click.Choice([o.value for o in Outcome]))
 @click.option("--db", "db_path", default=DEFAULT_DB_PATH, show_default=True)
@@ -456,47 +570,63 @@ def _render_case(data: dict) -> None:
         label = "Why this is not a verdict" if risk["category"] in (
             c.value for c in INDECISIVE
         ) else "Why this verdict was qualified"
-        click.secho(f"\n{label}: {uncertainty['reason']}.", fg=color)
+        click.echo()
+        _echo_wrapped(f"{uncertainty['reason']}.", f"{label}: ", fg=color)
     if uncertainty.get("unavailable_sources"):
-        click.echo(
-            "Not checked: " + ", ".join(uncertainty["unavailable_sources"])
-            + "  (absence of data from these is not evidence of safety)"
+        _echo_wrapped(
+            ", ".join(uncertainty["unavailable_sources"])
+            + "  (absence of data from these is not evidence of safety)",
+            "Not checked: ", fg="yellow",
         )
 
     if risk.get("top_contributors"):
-        click.echo("\nPrimary contributors:")
+        click.echo()
+        click.secho("Primary contributors:", fg="bright_cyan", bold=True)
         for c in risk["top_contributors"]:
-            click.echo(f"  - {c}")
+            _echo_wrapped(c, "  - ", fg=color)
 
     entities_by_id = {e["id"]: e for e in data.get("entities", [])}
     contradicting = [ev for ev in data.get("evidence", []) if ev.get("polarity") == "contradicts_threat"]
     if contradicting:
-        click.echo("\nCounter-evidence:")
+        click.echo()
+        click.secho("Counter-evidence:", fg="bright_cyan", bold=True)
         for c in contradicting[:5]:
             entity = entities_by_id.get(c.get("entity_id"))
             # Name the entity: several extracted indicators often produce the same
             # signal, and identical unattributed lines read as duplicated evidence.
             subject = f" [{entity['value']}]" if entity else ""
-            click.echo(f"  - {c['signal']}{subject}: {c['value']}")
+            _echo_wrapped(f"{c['signal']}{subject}: {c['value']}", "  - ", fg="green")
         # Some of the above is listed for completeness but was excluded from the
         # score arithmetic (see risk._discount_narrow_contradictions) — without this,
         # it reads as evidence that offsets the finding above it, when it does not.
         for note in uncertainty.get("discounted_counter_evidence") or []:
-            click.secho(f"    note: {note}", fg="bright_black")
+            _echo_wrapped(note, "    note: ", fg="bright_black")
 
     if risk.get("historical_similarity"):
         hs = risk["historical_similarity"]
-        click.echo(f"\nHistorical similarity: {hs['similarity']:.0%} to {hs['pattern_name']}")
+        # Never print a bare "historical similarity: N%" — that phrasing lets a
+        # reader assume "I have seen this exact artifact before" when the match
+        # may really be "this merely resembles a prior shape" or "this shares
+        # infrastructure with something else". historical_match_label spells out
+        # which one KRISIS actually means (see EXACT ARTIFACT VS INFRASTRUCTURE
+        # OVERLAP in pattern_memory.py).
+        click.echo()
+        click.secho(f"Historical match: {historical_match_label(hs)} — {hs['similarity']:.0%}", fg="magenta", bold=True)
+        _echo_wrapped(
+            f"prior case: {hs['pattern_name']} (prior outcome: {hs.get('prior_outcome') or 'unknown'})",
+            "  ", fg="bright_black",
+        )
 
-    click.echo(f"\n{data.get('explanation', '')}")
     click.echo()
-    click.secho("Recommended action:", bold=True)
-    click.echo(f"  {data.get('recommendation', '')}")
+    _echo_wrapped(data.get("explanation", ""), "", width=78)
+    click.echo()
+    click.secho("Recommended action:", fg="bright_cyan", bold=True)
+    _echo_wrapped(data.get("recommendation", ""), "  ", fg=color, width=76)
 
 
 def _render_evidence(data: dict) -> None:
     entities_by_id = {e["id"]: e for e in data.get("entities", [])}
-    click.echo("\n--- Evidence ---")
+    _section("Evidence")
     for ev in data.get("evidence", []):
         entity = entities_by_id.get(ev["entity_id"])
         target = entity["value"] if entity else ev["entity_id"]
@@ -507,7 +637,7 @@ def _render_evidence(data: dict) -> None:
 
 
 def _render_pivots(data: dict) -> None:
-    click.echo("\n--- Pivots ---")
+    _section("Pivots")
     for p in data.get("pivots", []):
         marker = "+" if p["status"] == "accepted" else "-"
         click.echo(
@@ -518,13 +648,13 @@ def _render_pivots(data: dict) -> None:
 
 
 def _render_patterns(pattern_matches: list) -> None:
-    click.echo("\n--- Historical Pattern Matches ---")
+    _section("Historical Pattern Matches")
     if not pattern_matches:
         click.echo("  none")
         return
     for m in pattern_matches:
         click.echo(
-            f"  overall {m['similarity']:.0%}  "
+            f"  {historical_match_label(m)} — overall {m['similarity']:.0%}  "
             f"(indicator {m.get('indicator_similarity', 0):.0%} / "
             f"structural {m.get('structural_similarity', 0):.0%})  {m['pattern_name']}"
         )
@@ -546,7 +676,7 @@ def _render_provider_usage(usage_by_provider: dict) -> None:
     """
     if not usage_by_provider:
         return
-    click.echo("\n--- Provider Usage ---")
+    _section("Provider Usage")
     for name, usage in usage_by_provider.items():
         parts = [f"calls {usage['calls']}"]
         for label, key in (("cached", "cached"), ("reused", "deduplicated"),
@@ -555,17 +685,33 @@ def _render_provider_usage(usage_by_provider: dict) -> None:
                 parts.append(f"{label} {usage[key]}")
         click.echo(f"  {name:<14} " + "  ".join(parts))
         for reason in usage.get("skip_reasons", []):
-            for i, line in enumerate(click.wrap_text(reason, width=70).splitlines()):
-                click.secho(f"      {'not spent: ' if i == 0 else '           '}{line}", fg="bright_black")
+            _echo_wrapped(reason, "      not spent: ", fg="bright_black")
+
+
+def _render_provider_failures(failures: list, skips: list) -> None:
+    """Genuine provider failures and deliberate planner skips, kept visibly separate.
+
+    A skip is a budget/value-gate decision working as intended; a failure is a
+    provider that ran and could not answer. Merging them under one "unavailable"
+    label makes a scarce-provider policy read as nine broken evidence sources.
+    """
+    if failures:
+        click.secho(f"\n[!] {len(failures)} evidence source(s) unavailable:", fg="yellow")
+        for note in failures:
+            _echo_wrapped(note, "    - ", fg="yellow")
+    if skips:
+        click.secho(f"\n[i] {len(skips)} provider request(s) deliberately skipped:", fg="bright_black")
+        for note in skips:
+            _echo_wrapped(note, "    - ", fg="bright_black")
 
 
 def _render_graph(graph) -> None:
-    click.echo("\n--- Investigation Graph ---")
+    _section("Investigation Graph")
     click.echo(graph.to_ascii())
 
 
 def _render_trace(trace) -> None:
-    click.echo("\n--- Investigation Trace ---")
+    _section("Investigation Trace")
     for i, step in enumerate(trace.steps, 1):
         stage = step.pop("stage")
         click.echo(f"  {i:>3}. {stage:<22} {step}")
