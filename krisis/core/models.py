@@ -299,6 +299,10 @@ class Case:
     # template fallback did (no key configured, or the call failed). Lets a
     # report label the explanation truthfully without re-deriving it.
     explanation_source: str = "deterministic"
+    # One casual, jargon-free sentence for a non-technical reader — "is this
+    # dangerous, in plain words" — distinct from `explanation`, which stays
+    # precise and technical. Always populated, LLM or template.
+    plain_summary: str = ""
     recommendation: str = ""
     outcome: Optional[str] = None    # an Outcome value, or None while never validated
     # A provider that ran and could not answer (outage, timeout, error response).
@@ -326,6 +330,7 @@ class Case:
             "risk": self.risk.to_dict() if self.risk else None,
             "explanation": self.explanation,
             "explanation_source": self.explanation_source,
+            "plain_summary": self.plain_summary,
             "recommendation": self.recommendation,
             "outcome": self.outcome,
             "provider_failures": self.provider_failures,

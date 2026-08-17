@@ -327,6 +327,10 @@ class _ReportPDF(FPDF):
             self.ln(1)
         self.h2("Recommended action")
         self.line_value(case.get("recommendation") or "(none recorded)")
+        if case.get("plain_summary"):
+            self.ln(1)
+            self.h2("In simple terms")
+            self.line_value(case["plain_summary"])
 
     def _primary_evidence(self) -> None:
         self.h1("Primary Evidence (Supporting)")

@@ -664,6 +664,11 @@ def _render_case(data: dict) -> None:
     click.secho("Recommended action:", fg="bright_cyan", bold=True)
     _echo_wrapped(data.get("recommendation", ""), "  ", fg=color, width=76)
 
+    if data.get("plain_summary"):
+        click.echo()
+        click.secho("In simple terms:", fg="bright_cyan", bold=True)
+        _echo_wrapped(data["plain_summary"], "  ", fg="white", width=76)
+
 
 def _render_evidence(data: dict) -> None:
     entities_by_id = {e["id"]: e for e in data.get("entities", [])}

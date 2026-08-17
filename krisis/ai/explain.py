@@ -56,7 +56,10 @@ SYSTEM_PROMPT = (
     "- Mention both supporting and contradicting evidence, even if one side is empty.\n"
     "Respond with ONLY a JSON object, no code fences, no commentary:\n"
     '{"summary": "<=120 words of plain prose", "key_findings": ["..."], '
-    '"uncertainties": ["..."], "recommended_actions": ["..."]}'
+    '"uncertainties": ["..."], "recommended_actions": ["..."], '
+    '"plain_summary": "<=30 words, one casual sentence a non-technical reader would '
+    'get in one breath — what this looks like and whether to be cautious, no jargon, '
+    'no leading label like \'in simple terms\'"}'
 )
 
 
@@ -68,6 +71,7 @@ class Explainer:
         self.model = model
         self.use_llm = use_llm and bool(self.api_key)
         self.last_source = "deterministic"
+        self.last_plain_summary = ""
 
     def explain(self, case: Case, graph: EntityGraph, correlation: CorrelationResult) -> str:
         # Recorded so a downstream consumer (the PDF report) can label the stored
@@ -77,8 +81,10 @@ class Explainer:
             model_result = self._explain_with_model(case, correlation)
             if model_result:
                 self.last_source = "ai"
+                self.last_plain_summary = self.last_plain_summary or _plain_summary_template(case, correlation)
                 return model_result
         self.last_source = "deterministic"
+        self.last_plain_summary = _plain_summary_template(case, correlation)
         return self._explain_with_template(case, correlation)
 
     # -- deterministic fallback / default ------------------------------------
@@ -219,7 +225,48 @@ class Explainer:
         except Exception:
             return None
 
-        return _render_structured(content) if content else None
+        if not content:
+            return None
+        data = _parse_json_object(content)
+        if data:
+            self.last_plain_summary = str(data.get("plain_summary", "")).strip()
+        return _render_structured(content)
+
+
+def _plain_summary_template(case: Case, correlation: CorrelationResult) -> str:
+    """A one-sentence, jargon-free verdict — always available, LLM or not.
+
+    Deliberately separate from `_explain_with_template`: that explanation is
+    precise and technical (score, confidence, named evidence). This is the
+    "should I be worried" sentence for a reader who won't parse that.
+    """
+    risk = case.risk
+    if risk is None:
+        return ""
+    seed = case.seed
+    if risk.category in (RiskCategory.INSUFFICIENT_EVIDENCE, RiskCategory.CONFLICTING_EVIDENCE,
+                          RiskCategory.UNKNOWN):
+        return (f"KRISIS couldn't reach a clear verdict on '{seed}' — treat it as unverified, "
+                f"not as safe, until it's checked further.")
+    identity_hit = any(e.evidence_type == "identity" for e in correlation.supporting)
+    concern = "impersonating a real brand or site" if identity_hit else "behaving suspiciously"
+    if risk.category in (RiskCategory.HIGH, RiskCategory.CRITICAL):
+        return f"'{seed}' looks like it's {concern} — mostly phishing/scam risk, don't interact with it if you're not sure."
+    if risk.category == RiskCategory.MEDIUM:
+        return f"'{seed}' shows signs of {concern}, but it isn't conclusive — be cautious and double-check before trusting it."
+    return f"'{seed}' looks OK — no meaningful signs of phishing or malicious activity were found."
+
+
+def _parse_json_object(content: str) -> Optional[dict]:
+    text = content.strip()
+    if text.startswith("```"):
+        text = text.split("```")[1] if "```" in text[3:] else text.strip("`")
+        text = text.split("\n", 1)[-1] if text.lower().startswith("json") else text
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _render_structured(content: str) -> Optional[str]:
@@ -231,15 +278,8 @@ def _render_structured(content: str) -> Optional[str]:
     discarded. Either way nothing here can change a score: this function only ever
     formats text that arrives after the risk engine has finished.
     """
-    text = content.strip()
-    if text.startswith("```"):
-        text = text.split("```")[1] if "```" in text[3:] else text.strip("`")
-        text = text.split("\n", 1)[-1] if text.lower().startswith("json") else text
-    try:
-        data = json.loads(text)
-    except (ValueError, TypeError):
-        return content or None
-    if not isinstance(data, dict):
+    data = _parse_json_object(content)
+    if data is None:
         return content or None
 
     lines = [str(data.get("summary", "")).strip()]

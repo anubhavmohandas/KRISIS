@@ -217,6 +217,7 @@ class Investigator:
 
         case.explanation = self.explainer.explain(case, graph, correlation)
         case.explanation_source = self.explainer.last_source
+        case.plain_summary = self.explainer.last_plain_summary
         case.recommendation = recommend_action(risk)
         trace.log("recommendation", text=case.recommendation)
 
