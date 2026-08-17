@@ -78,8 +78,8 @@ changes.
 | Signal | Status | Evidence source | Polarity | Independence | Confidence | Risk relevance | Priority | v1 decision |
 |---|---|---|---|---|---|---|---|---|
 | A / AAAA / CNAME / MX / NS / TXT / SOA records | IMPLEMENTED | `dns_collector.py:16-26` | neutral | independent | 0.9 | — | — | done |
-| SPF (TXT `v=spf1`) | NOT IMPLEMENTED | TXT record captured raw, never parsed | — | — | — | Low-Medium | P1 | deferred this pass — an earlier draft of this plan included it (P1: evidence source already exists), but the priority-framework review round replaced it with `sender_url_domain_mismatch` (§10) as the higher-value P0 item for the same "email context" focus area; not implemented, revisit as a standalone follow-up |
-| DMARC (`_dmarc.<domain>` TXT) | NOT IMPLEMENTED | no dedicated query | — | — | — | Low-Medium | P1 | deferred this pass, same reasoning as SPF above |
+| SPF (TXT `v=spf1`) | **IMPLEMENTED** | `dns_collector.py::_spf_evidence()`; signals `spf_record`/`spf_missing`/`spf_malformed` | neutral (all states) | derived (parsed from the domain's own already-queried TXT set) | 0.5-0.6 | Low-Medium | P1 | done — the standalone follow-up flagged below was picked up in the final completeness loop (`docs/PHISHING_COMPLETENESS_MATRIX.md`). Deliberately **neutral in every state**, not a `contradicts_threat` "weak positive signal": publishing SPF costs nothing and needs no vetting, so a freshly-registered phishing domain can publish one exactly as easily as `valid_tls_present` (`risk.py NARROW_CONTRADICTIONS`) or `certificate_subject_org_match` can be obtained by an attacker — presence proves the domain sends mail through the infrastructure it claims to, not that the infrastructure is legitimate. Absence is equally uninformative (`risk.py`'s own instruction: "no SPF... as automatic maliciousness" — never scored). Reported purely as investigator context/coverage, same as a raw DNS record. Reconstructs multi-segment TXT records (`_txt_value()`) by concatenating `.strings` per RFC 7208 §3.3 rather than `str(rdata)`, which found and fixed a real bug during live validation: `str()` on a >255-byte TXT record (e.g. github.com's real SPF record) renders each wire-format segment separately quoted, injecting a stray `" "` mid-string that silently truncated an IP literal (`ip4:62.253.2` / `27.114` instead of `ip4:62.253.227.114`) |
+| DMARC (`_dmarc.<domain>` TXT) | **IMPLEMENTED** | `dns_collector.py::_dmarc_evidence()`; signals `dmarc_record`/`dmarc_missing`/`dmarc_malformed` | neutral (all states) | independent (genuinely distinct DNS name, not derived from the root domain's TXT set) | 0.5-0.6 | Low-Medium | P1 | done — same pass, same reasoning as SPF above. Only answers what a single-domain DNS query honestly can: published/absent/malformed (>1 record, an RFC 7489 permerror). Deliberately does **not** attempt "aligned"/"misaligned" — that requires comparing against a *specific message's* `From:` domain, which needs the structured email/MIME input KRISIS does not have (§10 below); faking alignment against free-text-mined addresses would be exactly the false precision the loop prohibits. Live-verified: absent on a language subdomain pivoted to from `wikipedia.org` (`ja.wikipedia.org` — inherits nothing, reports `dmarc_missing` honestly rather than checking the organizational domain), present+`p=reject` on `wikipedia.org`/`google.com`/`github.com` |
 | DKIM | NOT IMPLEMENTED | none | — | — | — | Low | P2 | DKIM selectors are unknowable without a specific message's headers — needs the same structured-email-parser capability §10's P2 items need |
 | Mail-provider alignment (MX vs claimed sender domain) | NOT IMPLEMENTED | MX collected as pivot only | — | — | — | Low | P2 | no structured sender-domain field exists for any current input type; see §10 |
 | Domain-to-IP relationships | IMPLEMENTED | `pivot_engine.py:79-80 resolves_to` | — | — | — | — | — | done |
@@ -343,12 +343,45 @@ doc-finalize commit `4a61257`); test count corrected 286 → 337 where it
 describes current state (`KRISIS_CLI_V1_ACCEPTANCE.md`'s own dated §15-17
 snapshot, accurate as of its own commit, is left alone).
 
-**Dropped between drafts:** DNS SPF/DMARC presence (§3) was in an earlier
-version of this plan as P1 (evidence source exists) but was cut when the
-priority-framework review round explicitly named
-`sender_url_domain_mismatch` (item 5) as the higher-value P0 signal for the
-same focus area; SPF/DMARC remains a reasonable, low-effort standalone
-follow-up, not silently forgotten.
+## v1 Implementation Scope — final completeness loop
+
+One work item, landed and tested. Purely additive `NEUTRAL`-polarity evidence
+emission (no decision-rule branching), so per the loop's own mutation-testing
+scope (only decision rules require mutation testing; additive evidence needs
+dedicated evidence tests instead) it is covered by `tests/test_dns_collector.py`
+(12 tests, including `TestNeverAutomaticThreat` — locks every SPF/DMARC state
+to `neutral` polarity so a future change can't silently make absence or
+presence start moving the score) rather than a reverted-rule mutation test:
+
+**P1:**
+10. **DNS SPF/DMARC domain-level posture** — `dns_collector.py::_spf_evidence()` / `_dmarc_evidence()`; signals `spf_record`/`spf_missing`/`spf_malformed`/`dmarc_record`/`dmarc_missing`/`dmarc_malformed`. See §3 above for full detail on scope (presence/absence/malformed only, no alignment) and the deliberate all-`NEUTRAL` polarity decision. Found and fixed a real bug during live validation against `github.com`: multi-segment TXT records (any record over 255 bytes, common for SPF records with several `include:` mechanisms) were being read via `str(rdata)`, which renders each wire-format segment separately quoted and silently truncates/corrupts the value at the segment boundary; fixed by concatenating `rdata.strings` directly (`_txt_value()`), regression-tested with a synthetic multi-segment record and live-verified against the real `github.com` SPF record before/after.
+
+Test count: 337 → 349 pytest / 336 → 348 `unittest discover` (12 new tests,
+all in the new `tests/test_dns_collector.py` — no prior dedicated test file
+existed for `DNSCollector` at all). Validation matrix unchanged at 15/15
+(expected: neutral, non-scoring evidence cannot change a validation case's
+verdict by construction).
+
+Full scenario-coverage audit, P0-P3 classification of every remaining
+deferred capability, and the final freeze decision live in
+`docs/PHISHING_COMPLETENESS_MATRIX.md`.
+
+**Picked up in the final completeness loop:** DNS SPF/DMARC presence (§3) was
+cut from this pass (see above — replaced by `sender_url_domain_mismatch` as
+the higher-value P0 item for the same focus area) but flagged as a
+reasonable, low-effort standalone follow-up rather than silently forgotten.
+The final completeness loop (`docs/PHISHING_COMPLETENESS_MATRIX.md`) picked
+it up as P1: the DNS collector and TXT-parsing pattern already existed, only
+the SPF-prefix/`_dmarc` query logic was missing, and it closes a real (if
+narrow) gap — a domain's mail-security posture is investigator context no
+other collector surfaces. Implemented deliberately neutral in every state
+(see the §3 table entries above) rather than as the "weak positive signal"
+`README.md` had described in a line written ahead of this item actually
+being built — corrected in this pass once the same NARROW_CONTRADICTIONS
+reasoning already applied to `valid_tls_present` and
+`certificate_subject_org_match` was applied to it: any attacker can publish
+an SPF/DMARC record for a domain they control exactly as easily as they can
+get a DV certificate, so presence is not evidence of legitimacy either.
 
 ## P2/P3 — explicitly not built this pass
 

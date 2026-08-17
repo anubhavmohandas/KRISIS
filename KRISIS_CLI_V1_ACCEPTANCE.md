@@ -504,6 +504,16 @@ TLS, WHOIS, and identity signals beyond what CLI v1 shipped with. See that
 document and the updated `README.md` for what changed; this record is left
 as the CLI v1 snapshot it describes, not rewritten to include later work.
 
+A final completeness loop (`docs/PHISHING_COMPLETENESS_MATRIX.md`) then
+audited every remaining deferred capability against concrete phishing
+investigation scenarios, added DNS SPF/DMARC domain-level posture (the one
+item that closed a real, buildable gap — everything else deferred was
+found to be either provider-dependent, UI-dependent, or not worth the
+arbitrary-threshold risk), and issued the freeze decision: KRISIS CLI v1
+is feature-complete for its supported input types. Same rule applies —
+that document is the current source of truth for scope, this record stays
+a snapshot.
+
 ## 20. Why KRISIS is not merely a reputation-service wrapper
 
 A reputation wrapper returns one opaque number from one source and stops.

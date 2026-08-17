@@ -427,7 +427,7 @@ faked investigator). Run:
 python3 -m unittest discover -s tests -v
 ```
 
-337 tests covering: graph dedup/traversal, pivot budget/depth/noisy-fanout
+349 tests covering: graph dedup/traversal, pivot budget/depth/noisy-fanout
 enforcement, evidence polarity/diversity correlation, risk determinism/
 counter-evidence/diminishing-returns, provider-failure handling (never
 silently treated as "clean", and never conflated with a deliberate planner
@@ -475,6 +475,24 @@ verified external referent (`lookalike_domain`), so a script-mixed label
 with no referent is never worded as "imitates an established identity
 operated by someone else."
 
+Added with the final phishing-completeness loop (see
+`docs/PHISHING_COMPLETENESS_MATRIX.md` for the full scenario-by-scenario
+audit this drove): DNS SPF/DMARC domain-level posture
+(`tests/test_dns_collector.py`, 12 tests — no dedicated DNS-collector test
+file existed before this pass at all), including a dedicated test locking
+every SPF/DMARC state to neutral polarity so a future change cannot make
+absence or presence start moving the score silently. Live validation
+against real DNS surfaced and fixed a genuine bug in the process: TXT
+records over 255 bytes (a full-length SPF record with several `include:`
+mechanisms — GitHub's real one, for example) are split across multiple
+wire-format segments that must be concatenated with no separator to recover
+the actual text (RFC 7208 §3.3); reading them via `str(rdata)` instead
+rendered each segment separately quoted, silently truncating an IP literal
+mid-value (`ip4:62.253.2" "27.114` instead of `ip4:62.253.227.114`). Fixed
+by reconstructing from `rdata.strings` directly, regression-tested with a
+synthetic multi-segment record, and confirmed against the real GitHub SPF
+record before/after the fix.
+
 ## Current scope and honest limitations
 
 This is the first working slice of the full loop described in the design
@@ -497,8 +515,16 @@ docs, not the finished system. Implemented for real, end to end:
   issuer-organization signal, discounted from offsetting an identity finding
   the same way a bare valid-TLS presence already is
 - WHOIS expiration proximity, mirroring the existing registration-age pattern
-- DNS SPF/DMARC presence (weak positive signal only; absence is silent —
-  too common among legitimate domains to score as suspicious)
+- DNS SPF/DMARC presence: published/absent/malformed (>1 record — an RFC
+  permerror), reported purely as investigator context. Deliberately
+  **neutral in every state**, not a "weak positive signal" for presence —
+  publishing an SPF/DMARC record costs nothing and needs no vetting, so an
+  attacker's freshly-registered phishing domain can have one exactly as
+  easily as it can have a valid DV certificate (see `NARROW_CONTRADICTIONS`
+  in `risk.py`, the same reasoning already applied to `valid_tls_present`).
+  Answers presence/absence only, not header alignment against a specific
+  message — that needs structured email input the CLI does not expose (see
+  below)
 - Sender/URL domain mismatch within message-body text: the message never
   links back to the domain any email address mentioned in it belongs to
 - Budget-limited pivot engine with accept/reject reasoning
@@ -558,7 +584,11 @@ Not yet implemented (explicitly out of scope for this pass, see design docs
   feed" detector does not yet exist)
 
 Full signal-by-signal audit, including every deferred item and why, lives in
-`docs/PHISHING_SIGNAL_MATRIX.md`.
+`docs/PHISHING_SIGNAL_MATRIX.md`. The final completeness pass — concrete
+phishing scenarios KRISIS must be able to explain, which of them it can
+today, and the explicit REQUIRED/HIGH-VALUE-OPTIONAL/FUTURE-PROVIDER/
+FUTURE-UI/LOW-VALUE classification for everything still deferred — lives in
+`docs/PHISHING_COMPLETENESS_MATRIX.md`.
 
 ## Directory layout
 
@@ -571,5 +601,5 @@ krisis/
   cli.py         click CLI
   config.py      default collector wiring, API key loading
   pdf_report.py  PDF case report renderer (stored case -> PDF, no network)
-tests/           337 tests against the real execution path, mutation-verified
+tests/           349 tests against the real execution path, mutation-verified
 ```
